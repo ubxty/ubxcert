@@ -221,30 +221,10 @@ class SelfUpdateCommand extends BaseCommand
 
         chmod($tmp, 0700);
 
-        // Run the install script; pass --no-cron so it doesn't re-install the cron
-        // (existing cron already points to /usr/local/bin/ubxcert)
-        $cmd = "bash {$tmp} 2>&1";
+        // Stream install script output directly — popen/fgets causes buffering
+        // stalls with long-running subprocesses like composer install.
         $ret = 0;
-
-        if ($this->verbose) {
-            passthru($cmd, $ret);
-        } else {
-            // Stream but suppress line noise; only print errors
-            $proc = popen($cmd, 'r');
-            if ($proc !== false) {
-                while (!feof($proc)) {
-                    $line = fgets($proc);
-                    if ($line === false) {
-                        break;
-                    }
-                    // Print lines that look like errors or the final success line
-                    if (preg_match('/error|fail|done|installed|version/i', $line)) {
-                        echo '  ' . $line;
-                    }
-                }
-                $ret = pclose($proc);
-            }
-        }
+        passthru("bash {$tmp}", $ret);
 
         @unlink($tmp);
 
