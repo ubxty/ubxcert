@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Ubxty\UbxCert\Commands;
 
+use Ubxty\UbxCert\Util\VhostScanner;
+
 /**
  * ubxcert list
  *
@@ -89,7 +91,11 @@ class ListCommand extends BaseCommand
                 $daysLeft = $expiry !== null ? (int)(($expiry - time()) / 86400) : null;
                 $certDir  = $this->state->getCertDir($domain);
 
-                $rows[]       = $this->buildRow($domain, 'ubxcert', $certDir, $expiry, $daysLeft, $renewal, $order['order_status'] ?? 'valid');
+                $certPath    = $certDir . '/cert.pem';
+                [, , $wildcard] = $this->readCertInfo($certPath);
+                $installedOn = VhostScanner::domainSslWebserver($domain);
+
+                $rows[]        = $this->buildRow($domain, 'ubxcert', $certDir, $expiry, $daysLeft, $renewal, $order['order_status'] ?? 'valid', [], $wildcard, $installedOn);
                 $seen[$domain] = true;
             }
         }
@@ -123,7 +129,10 @@ class ListCommand extends BaseCommand
                 $renewal  = $daysLeft !== null && $daysLeft < 30;
                 $certDir  = dirname($certPath);
 
-                $rows[]        = $this->buildRow($domain, 'certbot', $certDir, $expiry, $daysLeft, $renewal, 'valid', $sans);
+                $isWildcard  = $this->isWildcardCert($sans);
+                $installedOn = VhostScanner::domainSslWebserver($domain);
+
+                $rows[]        = $this->buildRow($domain, 'certbot', $certDir, $expiry, $daysLeft, $renewal, 'valid', $sans, $isWildcard, $installedOn);
                 $seen[$domain] = true;
             }
         }
@@ -131,17 +140,17 @@ class ListCommand extends BaseCommand
         return $rows;
     }
 
-    /** @return array{0: int|null, 1: string[]} */
+    /** @return array{0: int|null, 1: string[], 2: bool} */
     private function readCertInfo(string $certPath): array
     {
         $pem = @file_get_contents($certPath);
         if ($pem === false) {
-            return [null, []];
+            return [null, [], false];
         }
 
         $cert = @openssl_x509_read($pem);
         if ($cert === false) {
-            return [null, []];
+            return [null, [], false];
         }
 
         $info   = openssl_x509_parse($cert);
@@ -157,7 +166,18 @@ class ListCommand extends BaseCommand
             }
         }
 
-        return [$expiry, $sans];
+        return [$expiry, $sans, $this->isWildcardCert($sans)];
+    }
+
+    /** @param string[] $sans */
+    private function isWildcardCert(array $sans): bool
+    {
+        foreach ($sans as $san) {
+            if (str_starts_with($san, '*.')) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** @param string[] $sans */
@@ -169,7 +189,9 @@ class ListCommand extends BaseCommand
         ?int    $daysLeft,
         bool    $renewal,
         string  $status,
-        array   $sans = []
+        array   $sans        = [],
+        bool    $wildcard    = false,
+        ?string $installedOn = null
     ): array {
         return [
             'domain'        => $domain,
@@ -180,6 +202,8 @@ class ListCommand extends BaseCommand
             'needs_renewal' => $renewal,
             'cert_dir'      => $certDir,
             'sans'          => $sans,
+            'wildcard'      => $wildcard,
+            'installed_on'  => $installedOn,
         ];
     }
 
@@ -206,10 +230,10 @@ class ListCommand extends BaseCommand
 
         // Table header
         printf(
-            "  \033[2m%-42s %-9s %-12s %-14s %s\033[0m\n",
-            'DOMAIN', 'SOURCE', 'STATUS', 'EXPIRES', 'DAYS'
+            "  \033[2m%-42s %-3s %-10s %-8s %-12s %-14s %s\033[0m\n",
+            'DOMAIN', 'WC', 'SOURCE', 'SERVER', 'STATUS', 'EXPIRES', 'DAYS'
         );
-        echo '  ' . str_repeat('─', 88) . "\n";
+        echo '  ' . str_repeat('─', 104) . "\n";
 
         $lastSource = null;
         foreach ($rows as $row) {
@@ -227,7 +251,7 @@ class ListCommand extends BaseCommand
 
             $daysLeft = $row['days_left'];
             if ($daysLeft === null) {
-                $daysStr = '  -';
+                $daysStr = '-';
             } elseif ($daysLeft < 0) {
                 $daysStr = "\033[31mEXPIRED\033[0m";
             } elseif ($daysLeft <= 14) {
@@ -239,11 +263,15 @@ class ListCommand extends BaseCommand
             }
 
             $statusColor = $row['status'] === 'valid' ? "\033[32m" : "\033[33m";
+            $wcFlag      = $row['wildcard']     ? "\033[35m★\033[0m" : ' ';
+            $installed   = $row['installed_on'] ?? '-';
 
             printf(
-                "  %-42s {$srcColor}%-9s\033[0m {$statusColor}%-12s\033[0m %-14s %s\n",
+                "  %-42s  %-1s  {$srcColor}%-10s\033[0m %-8s {$statusColor}%-12s\033[0m %-14s %s\n",
                 $row['domain'],
+                $wcFlag,
                 $row['source'],
+                $installed,
                 $row['status'],
                 $row['expiry'],
                 $daysStr
@@ -254,13 +282,14 @@ class ListCommand extends BaseCommand
                 $extraSans = array_filter($row['sans'], fn($s) => $s !== $row['domain']);
                 if (!empty($extraSans)) {
                     foreach ($extraSans as $san) {
-                        printf("  \033[2m  ↳ %-39s\033[0m\n", $san);
+                        $wcMark = str_starts_with($san, '*.') ? "\033[35m★\033[0m " : '  ';
+                        printf("  \033[2m  ↳ %s%-39s\033[0m\n", $wcMark, $san);
                     }
                 }
             }
         }
 
-        echo '  ' . str_repeat('─', 88) . "\n";
+        echo '  ' . str_repeat('─', 104) . "\n";
 
         if ($expired > 0 || $renew > 0) {
             echo "\n";

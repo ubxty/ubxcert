@@ -7,12 +7,15 @@ namespace Ubxty\UbxCert;
 use Throwable;
 use Ubxty\UbxCert\Commands\BaseCommand;
 use Ubxty\UbxCert\Commands\CompleteCommand;
+use Ubxty\UbxCert\Commands\DoctorCommand;
 use Ubxty\UbxCert\Commands\InstallWebserverCommand;
 use Ubxty\UbxCert\Commands\ListCommand;
+use Ubxty\UbxCert\Commands\MigrateCommand;
 use Ubxty\UbxCert\Commands\RenewCommand;
 use Ubxty\UbxCert\Commands\RequestCommand;
 use Ubxty\UbxCert\Commands\ScanServerCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
+use Ubxty\UbxCert\Commands\WizardCommand;
 
 /**
  * ubxcert CLI application router.
@@ -35,6 +38,9 @@ class Application
         $this->register(new ListCommand());
         $this->register(new StatusCommand());
         $this->register(new ScanServerCommand());
+        $this->register(new DoctorCommand());
+        $this->register(new WizardCommand());
+        $this->register(new MigrateCommand());
     }
 
     private function register(BaseCommand $cmd): void
@@ -115,9 +121,14 @@ class Application
     \033[36mrenew\033[0m      Renew one or all certificates expiring within N days
 
   \033[1mInspection:\033[0m
-    \033[36mlist\033[0m       List ALL certificates — ubxcert + certbot (drop-in for certbot certificates)
+    \033[36mlist\033[0m       List ALL certificates — ubxcert + certbot (wildcard detection, webserver column)
     \033[36mstatus\033[0m     Show order/challenge state for a single domain
     \033[36mserver\033[0m     Scan all vhosts, auto-detect web server, show SSL health per domain
+
+  \033[1mManagement:\033[0m
+    \033[36mdoctor\033[0m     Check PHP, extensions, binary, dirs, cron, cert health — overall status
+    \033[36mwizard\033[0m     Interactive TUI: detect webserver, pick site, issue + install cert
+    \033[36mmigrate\033[0m    Migrate certbot-managed certs to ubxcert management
 
   \033[1mGlobal flags:\033[0m
     \033[33m--staging\033[0m   Use Let's Encrypt staging (safe for testing)
@@ -325,6 +336,77 @@ T,
   3. Parses server_name (nginx/openresty) or ServerName (apache)
   4. Cross-references domains with /etc/ubxcert/certs/ and external cert files
   6. Prints a summary: total / SSL / ubxcert / external / no-SSL / expiring / expired
+T,
+
+            'doctor' => <<<T
+\033[1mubxcert doctor\033[0m — Check ubxcert installation health and SSL environment
+
+\033[1mUsage:\033[0m
+  ubxcert doctor
+  ubxcert doctor --json
+
+\033[1mChecks performed:\033[0m
+  • PHP version (≥8.1)
+  • PHP extensions: openssl, curl, json
+  • Binary: /usr/local/bin/ubxcert
+  • DNS tool: dig
+  • State directories: /etc/ubxcert/{certs,orders,accounts}/
+  • Log directory: /var/log/ubxcert/
+  • Auto-renewal cron: /etc/cron.d/ubxcert-renew
+  • Active web server detection
+  • Certificate health: expired / expiring within 30 days
+
+\033[1mExit codes:\033[0m
+  0 = healthy or warnings only
+  1 = critical issues found
+T,
+
+            'wizard' => <<<T
+\033[1mubxcert wizard\033[0m — Interactive certificate setup wizard
+
+\033[1mUsage:\033[0m
+  ubxcert wizard
+  ubxcert wizard --staging
+
+\033[1mOptions:\033[0m
+  --staging   \033[2mUse Let's Encrypt staging throughout (safe for testing)\033[0m
+
+\033[1mInteractive steps:\033[0m
+  1. Detect and list active web servers
+  2. Show all vhosts (with SSL status)
+  3. Pick a site by number or type a domain
+  4. Choose wildcard *.domain.com + domain.com or single domain
+  5. Enter account email
+  6. Run 'ubxcert request' and print DNS TXT challenge values
+  7. Pause — add TXT records to DNS — press Enter to continue
+  8. Run 'ubxcert complete --wait-dns 600'
+  9. Optionally run 'ubxcert install' for the detected web server
+T,
+
+            'migrate' => <<<T
+\033[1mubxcert migrate\033[0m — Migrate certbot certificates to ubxcert management
+
+\033[1mUsage:\033[0m
+  ubxcert migrate --all
+  ubxcert migrate --domain example.com
+  ubxcert migrate --all --dry-run
+  ubxcert migrate --all --email admin@example.com
+
+\033[1mOptions:\033[0m
+  --all        \033[2mMigrate all certbot certs in /etc/letsencrypt/live/\033[0m
+  --domain     \033[2mMigrate a single domain\033[0m
+  --email      \033[2mEmail to record in state.json for future renewals (default: migrated@ubxcert.local)\033[0m
+  --dry-run    \033[2mPrint what would happen without writing any files\033[0m
+
+\033[1mWhat it does per domain:\033[0m
+  1. Copies PEM files from /etc/letsencrypt/live/<domain>/ → /etc/ubxcert/certs/<domain>/
+  2. Creates a minimal state.json so 'ubxcert renew --all' can manage the cert
+  3. Updates /etc/letsencrypt/live/<domain>/ symlinks to point at the copied files
+  4. Originals are preserved in certbot's archive directory
+
+\033[1mNotes:\033[0m
+  Domains already in /etc/ubxcert/certs/ are skipped.
+  After migration, set the correct email with your next renewal request.
 T,
         ];
     }
