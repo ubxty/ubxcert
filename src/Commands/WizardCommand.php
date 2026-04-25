@@ -59,11 +59,16 @@ class WizardCommand extends BaseCommand
             }
         }
 
-        // Filter out wildcards and server defaults
-        $sites = array_values(array_filter($byDomain, fn($s) => $s['domain'] !== '_' && !str_starts_with($s['domain'], '*')));
+        // Filter out wildcards, server defaults, and sites from non-primary webservers
+        $sites = array_values(array_filter(
+            $byDomain,
+            fn($s) => $s['domain'] !== '_'
+                && !str_starts_with($s['domain'], '*')
+                && $s['webserver'] === $primary
+        ));
 
         if (empty($sites)) {
-            echo "\n  \033[33mNo virtual hosts found in scanned directories.\033[0m\n\n";
+            echo "\n  \033[33mNo virtual hosts found for \033[1m{$primary}\033[0m\033[33m in scanned directories.\033[0m\n\n";
             echo "  You can still issue a certificate manually:\n";
             echo '    ubxcert request --domains "*.example.com,example.com" --email admin@example.com' . "\n\n";
             return 0;
@@ -72,7 +77,7 @@ class WizardCommand extends BaseCommand
         usort($sites, fn($a, $b) => strcmp($a['domain'], $b['domain']));
 
         echo "\n";
-        echo "  \033[1mVirtual hosts found:\033[0m\n\n";
+        echo "  \033[1mVirtual hosts found (\033[36m{$primary}\033[0m\033[1m):\033[0m\n\n";
 
         printf("  \033[2m%-5s %-42s %-12s %-6s %s\033[0m\n", '#', 'DOMAIN', 'WEBSERVER', 'SSL', 'CONFIG');
         echo '  ' . str_repeat('─', 80) . "\n";
