@@ -156,11 +156,16 @@ class VhostScanner
     /** @return array<int, array<string, mixed>> */
     private static function parseNginx(string $content, string $file): array
     {
-        $content = preg_replace('/#[^\n]*/', '', $content);
-        preg_match_all('/\bserver\s*\{((?:[^{}]|\{[^{}]*\})*)\}/s', $content, $m);
+        // Strip line comments first
+        $content = preg_replace('/#[^\n]*/', '', $content) ?? $content;
+
+        // Use a brace-counter to extract top-level server{} blocks.
+        // The old regex (?:[^{}]|\{[^{}]*\})* only handles 2 levels of nesting
+        // and silently drops configs with 3+ levels (e.g. location { lua_block { } }).
+        $blocks = self::extractServerBlocks($content);
 
         $sites = [];
-        foreach ($m[1] ?? [] as $block) {
+        foreach ($blocks as $block) {
             preg_match('/\bserver_name\s+([^;]+);/', $block, $snm);
             if (!$snm) {
                 continue;
@@ -195,6 +200,48 @@ class VhostScanner
         }
 
         return $sites;
+    }
+
+    /**
+     * Extract the contents of all top-level server{} blocks using brace counting.
+     * Handles arbitrary nesting depth (lua_block, map, geo, etc.).
+     *
+     * @return list<string>
+     */
+    private static function extractServerBlocks(string $content): array
+    {
+        $blocks = [];
+        $offset = 0;
+        $len    = strlen($content);
+
+        while ($offset < $len) {
+            // Find next 'server' keyword immediately followed by optional whitespace then '{'
+            if (!preg_match('/\bserver\s*\{/s', $content, $m, PREG_OFFSET_CAPTURE, $offset)) {
+                break;
+            }
+
+            $start = $m[0][1] + strlen($m[0][0]); // position right after '{'
+            $depth = 1;
+            $pos   = $start;
+
+            while ($pos < $len && $depth > 0) {
+                $ch = $content[$pos];
+                if ($ch === '{') {
+                    $depth++;
+                } elseif ($ch === '}') {
+                    $depth--;
+                }
+                $pos++;
+            }
+
+            if ($depth === 0) {
+                $blocks[] = substr($content, $start, $pos - $start - 1);
+            }
+
+            $offset = $pos;
+        }
+
+        return $blocks;
     }
 
     /** @return array<int, array<string, mixed>> */
