@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace Ubxty\UbxCert\Commands;
 
+use Ubxty\UbxCert\Application;
+
 /**
  * ubxcert self-update
  *
