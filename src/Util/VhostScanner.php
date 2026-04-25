@@ -176,11 +176,20 @@ class VhostScanner
                 if ($name === '_' || $name === '') {
                     continue;
                 }
+                // Nginx uses .example.com (leading dot) as shorthand for
+                // both example.com and *.example.com. Normalise it to the bare domain.
+                if (str_starts_with($name, '.')) {
+                    $name = ltrim($name, '.');
+                }
+                if ($name === '') {
+                    continue;
+                }
                 $sites[] = [
-                    'domain'   => $name,
-                    'config'   => basename($file),
-                    'ssl'      => $hasSsl,
-                    'ssl_cert' => $sslCert,
+                    'domain'      => $name,
+                    'config'      => basename($file),
+                    'config_path' => $file,
+                    'ssl'         => $hasSsl,
+                    'ssl_cert'    => $sslCert,
                 ];
             }
         }
@@ -206,8 +215,9 @@ class VhostScanner
             $sslCert = isset($cm[1]) ? trim($cm[1]) : null;
 
             $sites[] = [
-                'domain'   => trim($snm[1]),
-                'config'   => basename($file),
+                'domain'      => trim($snm[1]),
+                'config'      => basename($file),
+                'config_path' => $file,
                 'ssl'      => $hasSsl,
                 'ssl_cert' => $sslCert,
             ];
