@@ -96,8 +96,13 @@ class StateManager
     public function deleteOrderState(string $domain): void
     {
         $dir = $this->getOrderDir($domain);
-        foreach (glob($dir . '/*') as $file) {
-            unlink($file);
+        if (!is_dir($dir)) {
+            return;
+        }
+        foreach (glob($dir . '/{,.}*', GLOB_BRACE) ?: [] as $file) {
+            if (is_file($file)) {
+                unlink($file);
+            }
         }
     }
 

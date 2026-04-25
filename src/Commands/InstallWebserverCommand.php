@@ -86,6 +86,7 @@ class InstallWebserverCommand extends BaseCommand
 
         $this->serviceReload('openresty');
         $this->success("OpenResty reloaded with wildcard certificate.");
+        $this->log('info', "certificate installed for {$domain} on openresty");
         return 0;
     }
 
@@ -116,6 +117,7 @@ class InstallWebserverCommand extends BaseCommand
         $this->success("Nginx config test passed.");
         $this->serviceReload('nginx');
         $this->success("Nginx reloaded with wildcard certificate.");
+        $this->log('info', "certificate installed for {$domain} on nginx");
         return 0;
     }
 
@@ -154,6 +156,7 @@ class InstallWebserverCommand extends BaseCommand
         $this->success("Apache config test passed.");
         $this->serviceReload('apache2');
         $this->success("Apache reloaded with wildcard certificate.");
+        $this->log('info', "certificate installed for {$domain} on apache");
         return 0;
     }
 

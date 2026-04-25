@@ -138,6 +138,7 @@ class RequestCommand extends BaseCommand
         ];
 
         $this->state->saveOrderState($baseDomain, $state);
+        $this->log('info', "order created for {$baseDomain} domains=[" . implode(',', $domains) . "] staging=" . ($this->staging ? 'yes' : 'no'));
         $this->verbose("Order state saved to: " . $this->state->getOrderDir($baseDomain) . '/state.json');
 
         return $this->outputChallenges($state);

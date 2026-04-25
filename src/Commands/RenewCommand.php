@@ -80,6 +80,7 @@ class RenewCommand extends BaseCommand
 
         $this->out('');
         $this->out("Renewal complete: renewed={$renewed}, skipped={$skipped}, failed={$failed}");
+        $this->log('info', "renewal run: renewed={$renewed} skipped={$skipped} failed={$failed}");
 
         if (!empty($errors)) {
             foreach ($errors as $err) {
