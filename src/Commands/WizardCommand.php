@@ -24,6 +24,7 @@ class WizardCommand extends BaseCommand
     public function run(array $args): int
     {
         $this->parseCommonArgs($args);
+        $verbose = $this->hasFlag($args, 'v') || $this->hasFlag($args, 'verbose');
 
         $this->printBanner();
 
@@ -64,6 +65,7 @@ class WizardCommand extends BaseCommand
             $byDomain,
             fn($s) => $s['domain'] !== '_'
                 && !str_starts_with($s['domain'], '*')
+                && !str_starts_with($s['domain'], '.')
                 && $s['webserver'] === $primary
         ));
 
@@ -76,24 +78,57 @@ class WizardCommand extends BaseCommand
 
         usort($sites, fn($a, $b) => strcmp($a['domain'], $b['domain']));
 
+        // Check which domains already have an ubxcert/certbot cert
+        $certDirs = ['/etc/ubxcert/certs', '/etc/letsencrypt/live'];
+        $hasCert  = static function (string $domain) use ($certDirs): bool {
+            $base = ltrim($domain, '*.');
+            foreach ($certDirs as $dir) {
+                if (is_dir("{$dir}/{$base}") || is_dir("{$dir}/*.{$base}")) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
         echo "\n";
         echo "  \033[1mVirtual hosts found (\033[36m{$primary}\033[0m\033[1m):\033[0m\n\n";
 
-        printf("  \033[2m%-5s %-42s %-12s %-6s %s\033[0m\n", '#', 'DOMAIN', 'WEBSERVER', 'SSL', 'CONFIG');
-        echo '  ' . str_repeat('─', 80) . "\n";
+        if ($verbose) {
+            printf("  \033[2m%-5s %-38s %-12s %-6s %-6s %s\033[0m\n", '#', 'DOMAIN', 'WEBSERVER', 'SSL', 'CERT', 'CONFIG PATH');
+            echo '  ' . str_repeat('─', 100) . "\n";
+        } else {
+            printf("  \033[2m%-5s %-42s %-12s %-6s %-6s %s\033[0m\n", '#', 'DOMAIN', 'WEBSERVER', 'SSL', 'CERT', 'CONFIG');
+            echo '  ' . str_repeat('─', 90) . "\n";
+        }
 
         foreach ($sites as $i => $site) {
-            $sslBadge = $site['ssl']
-                ? "\033[32myes\033[0m"
-                : "\033[33mno\033[0m ";
-            printf(
-                "  \033[36m%-5s\033[0m %-42s %-12s %-6s %s\n",
-                "[{$i}]",
-                $site['domain'],
-                $site['webserver'],
-                $sslBadge,
-                $site['config']
-            );
+            $sslBadge  = $site['ssl'] ? "\033[32myes\033[0m" : "\033[33mno\033[0m ";
+            $certified = $hasCert($site['domain']);
+            $certBadge = $certified ? "\033[32m✓\033[0m    " : "\033[33m✗\033[0m    ";
+            $configStr = $verbose
+                ? ($site['config_path'] ?? $site['config'])
+                : $site['config'];
+            if ($verbose) {
+                printf(
+                    "  \033[36m%-5s\033[0m %-38s %-12s %-6s %-6s %s\n",
+                    "[{$i}]",
+                    $site['domain'],
+                    $site['webserver'],
+                    $sslBadge,
+                    $certBadge,
+                    $configStr
+                );
+            } else {
+                printf(
+                    "  \033[36m%-5s\033[0m %-42s %-12s %-6s %-6s %s\n",
+                    "[{$i}]",
+                    $site['domain'],
+                    $site['webserver'],
+                    $sslBadge,
+                    $certBadge,
+                    $configStr
+                );
+            }
         }
 
         echo "\n";
