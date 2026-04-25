@@ -1,0 +1,30 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Locate the autoloader — works both from source and when globally installed
+$autoloadCandidates = [
+    __DIR__ . '/../vendor/autoload.php',      // dev / source run
+    __DIR__ . '/../../../autoload.php',        // globally installed in vendor/bin
+    '/opt/ubxcert/vendor/autoload.php',        // default global install path
+];
+
+$loaded = false;
+foreach ($autoloadCandidates as $candidate) {
+    if (file_exists($candidate)) {
+        require $candidate;
+        $loaded = true;
+        break;
+    }
+}
+
+if (!$loaded) {
+    fwrite(STDERR, "ubxcert: autoloader not found. Run 'composer install' inside the package directory.\n");
+    exit(1);
+}
+
+use Ubxty\UbxCert\Application;
+
+$app = new Application();
+exit($app->run($argv));
