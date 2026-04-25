@@ -203,9 +203,37 @@ class SelfUpdateCommand extends BaseCommand
 
     private function runInstall(string $version): int
     {
-        $this->out("Updating to v{$version}...\n");
+        $installDir = '/opt/ubxcert';
 
-        // Download install script to a temp file
+        // For an existing installation, we only need git pull + composer install.
+        // Running the full install script from PHP causes subprocess stdin
+        // buffering deadlocks (php -m | grep inside a PHP passthru subprocess).
+        if (is_dir($installDir . '/.git')) {
+            $this->out("Pulling latest code into {$installDir}...\n");
+            passthru("git -C {$installDir} pull --ff-only 2>&1", $rc1);
+            if ($rc1 !== 0) {
+                $this->fail("git pull failed (exit {$rc1}).");
+                return 1;
+            }
+
+            $this->out("Installing dependencies...\n");
+            passthru(
+                "composer install -d {$installDir} --no-dev --no-interaction --optimize-autoloader 2>&1",
+                $rc2
+            );
+            if ($rc2 !== 0) {
+                $this->fail("composer install failed (exit {$rc2}).");
+                return 1;
+            }
+
+            $newVer = $this->getCurrentVersion();
+            $this->success("ubxcert updated to v{$newVer}.");
+            return 0;
+        }
+
+        // Fresh install (no /opt/ubxcert/.git) — fall back to the install script.
+        $this->out("Fresh install — downloading install script...\n");
+
         $tmp = '/tmp/ubxcert-install-' . bin2hex(random_bytes(4)) . '.sh';
 
         $script = $this->httpGet(self::INSTALL_SCRIPT_URL);
@@ -220,20 +248,14 @@ class SelfUpdateCommand extends BaseCommand
         }
 
         chmod($tmp, 0700);
-
-        // Stream install script output directly — popen/fgets causes buffering
-        // stalls with long-running subprocesses like composer install.
-        $ret = 0;
-        passthru("bash {$tmp}", $ret);
-
+        passthru("bash {$tmp}", $rc);
         @unlink($tmp);
 
-        if ($ret !== 0) {
-            $this->fail("Install script exited with code {$ret}.");
+        if ($rc !== 0) {
+            $this->fail("Install script exited with code {$rc}.");
             return 1;
         }
 
-        // Verify the new version was installed
         $newVer = $this->getCurrentVersion();
         $this->success("ubxcert updated to v{$newVer}.");
         return 0;
