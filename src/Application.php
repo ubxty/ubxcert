@@ -11,6 +11,7 @@ use Ubxty\UbxCert\Commands\InstallWebserverCommand;
 use Ubxty\UbxCert\Commands\ListCommand;
 use Ubxty\UbxCert\Commands\RenewCommand;
 use Ubxty\UbxCert\Commands\RequestCommand;
+use Ubxty\UbxCert\Commands\ScanServerCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
 
 /**
@@ -33,6 +34,7 @@ class Application
         $this->register(new RenewCommand());
         $this->register(new ListCommand());
         $this->register(new StatusCommand());
+        $this->register(new ScanServerCommand());
     }
 
     private function register(BaseCommand $cmd): void

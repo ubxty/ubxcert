@@ -59,11 +59,10 @@ class CompleteCommand extends BaseCommand
         $this->out("Order status : {$state['order_status']}");
 
         // --- Reconstruct ACME client ----------------------------------------
-        $staging = $state['staging'] ?? $this->staging;
-        $kid     = $state['kid'];
-        $jws     = JwsHelper::load($state['cert_key_path']);          // cert key (signing CSR)
+        $staging    = $state['staging'] ?? $this->staging;
+        $kid        = $state['kid'];
         $accountJws = JwsHelper::load($this->state->getAccountKeyPath($state['email']));
-        $client  = new AcmeClient($staging);
+        $client     = new AcmeClient($staging);
 
         // --- Wait for DNS propagation (optional) ----------------------------
         if ($waitDns > 0) {
@@ -187,8 +186,9 @@ class CompleteCommand extends BaseCommand
         $state['completed_at']  = date('c');
         $this->state->saveOrderState($domain, $state);
 
-        $expiry = $this->certs->getExpiryFormatted($domain);
+        $expiry  = $this->certs->getExpiryFormatted($domain);
         $certDir = $this->state->getCertDir($domain);
+        $this->log('info', "certificate issued for {$domain} expiry={$expiry}");
 
         if ($this->jsonMode) {
             $this->outputJson([

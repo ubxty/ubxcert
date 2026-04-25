@@ -7,6 +7,7 @@ namespace Ubxty\UbxCert\Commands;
 use Ubxty\UbxCert\Acme\AcmeClient;
 use Ubxty\UbxCert\Acme\JwsHelper;
 use Ubxty\UbxCert\Cert\CertificateManager;
+use Ubxty\UbxCert\Logger;
 use Ubxty\UbxCert\State\StateManager;
 
 /**
@@ -33,6 +34,16 @@ abstract class BaseCommand
 
     /** @param string[] $args argv after the command name */
     abstract public function run(array $args): int;
+
+    // -------------------------------------------------------------------------
+    // Logging
+    // -------------------------------------------------------------------------
+
+    /** Write a line to /var/log/ubxcert/ubxcert.log */
+    protected function log(string $level, string $message): void
+    {
+        Logger::write($level, $this->getName(), $message);
+    }
 
     // -------------------------------------------------------------------------
     // Output helpers

@@ -28,11 +28,12 @@ LOCAL_SOURCE=""
 # Parse args
 # -------------------------------------------------------------------------
 STAGING=0
-for arg in "$@"; do
-    case "$arg" in
-        --staging)   STAGING=1 ;;
-        --source=*)  LOCAL_SOURCE="${arg#*=}" ;;
-        --source)    shift; LOCAL_SOURCE="$1" ;;
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --staging)   STAGING=1; shift ;;
+        --source=*)  LOCAL_SOURCE="${1#*=}"; shift ;;
+        --source)    shift; LOCAL_SOURCE="$1"; shift ;;
+        *)           shift ;;
     esac
 done
 
