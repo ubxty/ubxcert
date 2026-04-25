@@ -172,6 +172,14 @@ class InstallWebserverCommand extends BaseCommand
     {
         $conf = file_get_contents($confFile);
 
+        // Normalize: strip the deprecated `http2` parameter from listen lines.
+        // Newer nginx/OpenResty (≥1.25.1) requires `http2 on;` as a standalone
+        // directive. Having both `listen 443 ssl http2;` and `http2 on;` causes
+        // "http2 directive is duplicate" — a common state when the stored vhost
+        // was written with old-style listen and the panel template re-added the
+        // standalone directive.
+        $conf = preg_replace('/\blisten(\s+\S+\s+ssl)\s+http2\s*;/i', 'listen$1;', $conf);
+
         // Already has directives → update in-place
         if (str_contains($conf, 'ssl_certificate ') || str_contains($conf, 'ssl_certificate_key ')) {
             $conf = preg_replace('/^\s*ssl_certificate\s+\S+;/m',           "    ssl_certificate {$certFile};", $conf);
