@@ -18,14 +18,17 @@ class VhostScanner
     public const CONF_DIRS = [
         'openresty' => [
             '/usr/local/openresty/nginx/conf/sites-enabled',
+            '/usr/local/openresty/nginx/conf/sites-available',
             '/usr/local/openresty/nginx/conf/conf.d',
         ],
         'nginx' => [
             '/etc/nginx/sites-enabled',
+            '/etc/nginx/sites-available',
             '/etc/nginx/conf.d',
         ],
         'apache' => [
             '/etc/apache2/sites-enabled',
+            '/etc/apache2/sites-available',
         ],
     ];
 
