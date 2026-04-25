@@ -51,22 +51,27 @@ class WizardCommand extends BaseCommand
         // ── 2. List all sites ───────────────────────────────────────────────
         $allSites = VhostScanner::listAllSites();
 
-        // Deduplicate: prefer SSL entries; group by domain
+        // Filter to primary webserver FIRST, then deduplicate.
+        // Deduplicating across all webservers and filtering afterwards causes
+        // the wrong webserver's entry to win: e.g. a stopped nginx SSL entry
+        // would overwrite the running openresty non-SSL entry via the "prefer
+        // SSL" rule, then get removed by the webserver filter — hiding the domain.
+        $primarySites = array_filter($allSites, fn($s) => $s['webserver'] === $primary);
+
         $byDomain = [];
-        foreach ($allSites as $s) {
+        foreach ($primarySites as $s) {
             $d = $s['domain'];
             if (!isset($byDomain[$d]) || (!$byDomain[$d]['ssl'] && $s['ssl'])) {
                 $byDomain[$d] = $s;
             }
         }
 
-        // Filter out wildcards, server defaults, and sites from non-primary webservers
+        // Filter out wildcards and server defaults
         $sites = array_values(array_filter(
             $byDomain,
             fn($s) => $s['domain'] !== '_'
                 && !str_starts_with($s['domain'], '*')
                 && !str_starts_with($s['domain'], '.')
-                && $s['webserver'] === $primary
         ));
 
         if (empty($sites)) {
