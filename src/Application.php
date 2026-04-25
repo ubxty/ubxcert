@@ -14,6 +14,7 @@ use Ubxty\UbxCert\Commands\MigrateCommand;
 use Ubxty\UbxCert\Commands\RenewCommand;
 use Ubxty\UbxCert\Commands\RequestCommand;
 use Ubxty\UbxCert\Commands\ScanServerCommand;
+use Ubxty\UbxCert\Commands\SelfUpdateCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
 use Ubxty\UbxCert\Commands\WizardCommand;
 
@@ -25,6 +26,12 @@ use Ubxty\UbxCert\Commands\WizardCommand;
 class Application
 {
     private const VERSION = '1.0.0';
+
+    /** Expose version so SelfUpdateCommand can read it at runtime. */
+    public static function getVersion(): string
+    {
+        return self::VERSION;
+    }
 
     /** @var BaseCommand[] */
     private array $commands = [];
@@ -41,6 +48,7 @@ class Application
         $this->register(new DoctorCommand());
         $this->register(new WizardCommand());
         $this->register(new MigrateCommand());
+        $this->register(new SelfUpdateCommand());
     }
 
     private function register(BaseCommand $cmd): void
@@ -62,7 +70,7 @@ class Application
         }
 
         if (in_array($commandName, ['version', '--version', '-V'], true)) {
-            echo "ubxcert " . self::VERSION . "\n";
+            $this->printVersion(in_array('--check', $args, true));
             return 0;
         }
 
@@ -101,6 +109,66 @@ class Application
         }
     }
 
+    private function printVersion(bool $checkRemote = false): void
+    {
+        $current = self::VERSION;
+        echo "ubxcert v{$current}";
+
+        if (!$checkRemote) {
+            echo "\n";
+            echo "  Run \033[36mubxcert --version --check\033[0m to check for updates.\n";
+            return;
+        }
+
+        echo " — checking for updates...\n";
+
+        $json   = null;
+        $latest = null;
+
+        if (extension_loaded('curl')) {
+            $ch = curl_init('https://api.github.com/repos/ubxty/ubxcert/releases/latest');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_USERAGENT      => 'ubxcert/' . $current,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+            ]);
+            $body = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($body !== false && $code === 200) {
+                $json = $body;
+            }
+        } else {
+            $ctx  = stream_context_create(['http' => ['timeout' => 10, 'user_agent' => 'ubxcert/' . $current]]);
+            $body = @file_get_contents('https://api.github.com/repos/ubxty/ubxcert/releases/latest', false, $ctx);
+            if ($body !== false) {
+                $json = $body;
+            }
+        }
+
+        if ($json !== null) {
+            $data = @json_decode($json, true);
+            if (is_array($data) && isset($data['tag_name'])) {
+                $latest = ltrim(trim($data['tag_name']), 'v');
+            }
+        }
+
+        if ($latest === null) {
+            echo "  \033[33mCould not reach GitHub to check for updates.\033[0m\n";
+            return;
+        }
+
+        if (version_compare($latest, $current, '>')) {
+            echo "  \033[32mNew version available: v{$latest}\033[0m\n";
+            echo "  Run: \033[36msudo ubxcert self-update\033[0m\n";
+        } else {
+            echo "  \033[2mYou are up-to-date.\033[0m\n";
+        }
+    }
+
     private function printHelp(): void
     {
         $v = self::VERSION;
@@ -126,9 +194,10 @@ class Application
     \033[36mserver\033[0m     Scan all vhosts, auto-detect web server, show SSL health per domain
 
   \033[1mManagement:\033[0m
-    \033[36mdoctor\033[0m     Check PHP, extensions, binary, dirs, cron, cert health — overall status
-    \033[36mwizard\033[0m     Interactive TUI: detect webserver, pick site, issue + install cert
-    \033[36mmigrate\033[0m    Migrate certbot-managed certs to ubxcert management
+    \033[36mdoctor\033[0m      Check PHP, extensions, binary, dirs, cron, cert health — overall status
+    \033[36mwizard\033[0m      Interactive TUI: detect webserver, pick site, issue + install cert
+    \033[36mmigrate\033[0m     Migrate certbot-managed certs to ubxcert management
+    \033[36mself-update\033[0m Update ubxcert to the latest version from GitHub
 
   \033[1mGlobal flags:\033[0m
     \033[33m--staging\033[0m   Use Let's Encrypt staging (safe for testing)
@@ -407,6 +476,34 @@ T,
 \033[1mNotes:\033[0m
   Domains already in /etc/ubxcert/certs/ are skipped.
   After migration, set the correct email with your next renewal request.
+T,
+
+            'self-update' => <<<T
+\033[1mubxcert self-update\033[0m — Update ubxcert to the latest version from GitHub
+
+\033[1mUsage:\033[0m
+  ubxcert self-update
+  ubxcert self-update --check
+  ubxcert self-update --force
+  ubxcert self-update --verbose
+
+\033[1mOptions:\033[0m
+  --check    \033[2mCheck for a new version but do not install\033[0m
+  --force    \033[2mRe-install even if already on the latest version\033[0m
+  --verbose  \033[2mStream the full install script output\033[0m
+  --json     \033[2mOutput version comparison as JSON\033[0m
+
+\033[1mWhat it does:\033[0m
+  1. Queries the GitHub releases API for the latest tag
+  2. Compares it against the installed version
+  3. Downloads install-ubxcert.sh from the main branch
+  4. Runs it as root, replacing /opt/ubxcert and /usr/local/bin/ubxcert
+  5. Reports the new version after completion
+
+\033[1mNotes:\033[0m
+  Root is required — run: sudo ubxcert self-update
+  The existing cron job and state directories are preserved.
+  Use 'ubxcert --version --check' to only check without installing.
 T,
         ];
     }
