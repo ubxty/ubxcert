@@ -165,7 +165,11 @@ class JwsHelper
         if ($payload === null) {
             $encodedPayload = '';
         } else {
-            $encodedPayload = self::base64url(json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
+            // An empty PHP array encodes as "[]" but ACME requires "{}" for challenge trigger (RFC 8555 §7.5.1)
+            $encodedPayload = self::base64url(json_encode(
+                empty($payload) ? (object) [] : $payload,
+                JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE
+            ));
         }
 
         $signingInput = "{$protectedHeader}.{$encodedPayload}";
