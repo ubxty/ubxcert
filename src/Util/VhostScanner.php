@@ -117,6 +117,22 @@ class VhostScanner
                         ? self::parseApache($content, $file)
                         : self::parseNginx($content, $file);
 
+                    // Fallback: if the parser found nothing in a .conf file, derive the
+                    // domain from the filename itself (e.g. example.com.conf → example.com).
+                    // This ensures sites are never missed due to parser limitations.
+                    if (empty($entries)) {
+                        $name = basename($file, '.conf');
+                        if ($name !== 'default' && $name !== '' && !str_starts_with($name, '.')) {
+                            $entries = [[
+                                'domain'      => $name,
+                                'config'      => basename($file),
+                                'config_path' => $file,
+                                'ssl'         => false,
+                                'ssl_cert'    => null,
+                            ]];
+                        }
+                    }
+
                     foreach ($entries as $entry) {
                         $key = $entry['domain'] . '|' . ($entry['ssl'] ? '1' : '0') . '|' . $ws;
                         if (!isset($seen[$key])) {

@@ -13,6 +13,7 @@ use Ubxty\UbxCert\Commands\ListCommand;
 use Ubxty\UbxCert\Commands\MigrateCommand;
 use Ubxty\UbxCert\Commands\RenewCommand;
 use Ubxty\UbxCert\Commands\RequestCommand;
+use Ubxty\UbxCert\Commands\ScanCommand;
 use Ubxty\UbxCert\Commands\ScanServerCommand;
 use Ubxty\UbxCert\Commands\SelfUpdateCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
@@ -46,6 +47,7 @@ class Application
         $this->register(new StatusCommand());
         $this->register(new ScanServerCommand());
         $this->register(new DoctorCommand());
+        $this->register(new ScanCommand());
         $this->register(new WizardCommand());
         $this->register(new MigrateCommand());
         $this->register(new SelfUpdateCommand());
@@ -195,6 +197,7 @@ class Application
 
   \033[1mManagement:\033[0m
     \033[36mdoctor\033[0m      Check PHP, extensions, binary, dirs, cron, cert health — overall status
+    \033[36mscan\033[0m        Diagnostic: list all vhost config files and parsed domains (debug tool)
     \033[36mwizard\033[0m      Interactive TUI: detect webserver, pick site, issue + install cert
     \033[36mmigrate\033[0m     Migrate certbot-managed certs to ubxcert management
     \033[36mself-update\033[0m Update ubxcert to the latest version from GitHub
@@ -476,6 +479,25 @@ T,
 \033[1mNotes:\033[0m
   Domains already in /etc/ubxcert/certs/ are skipped.
   After migration, set the correct email with your next renewal request.
+T,
+
+            'scan' => <<<T
+\033[1mubxcert scan\033[0m — Diagnostic: list all vhost config files and parsed domains
+
+\033[1mUsage:\033[0m
+  ubxcert scan
+  ubxcert scan --json
+
+\033[1mWhat it shows:\033[0m
+  For each webserver config directory scanned:
+  • Whether the directory exists
+  • Each .conf file found and whether it was readable
+  • Which domains were parsed from it
+  • [filename fallback] label if parsing failed and the filename was used instead
+
+\033[1mTip:\033[0m
+  If a domain is missing from 'ubxcert wizard' or 'ubxcert list', run this to see
+  exactly which config files are being scanned and what was parsed from each.
 T,
 
             'self-update' => <<<T
