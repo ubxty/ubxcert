@@ -35,6 +35,9 @@ class SelfUpdateCommand extends BaseCommand
     /** Fallback: list of git tags endpoint */
     private const TAGS_API_URL = 'https://api.github.com/repos/ubxty/ubxcert/tags';
 
+    /** Set to true once any HTTP request receives any response (even 4xx) from GitHub */
+    private bool $githubReachable = false;
+
     public function getName(): string        { return 'self-update'; }
     public function getDescription(): string { return 'Update ubxcert to the latest version from GitHub'; }
 
@@ -49,6 +52,23 @@ class SelfUpdateCommand extends BaseCommand
         $latest  = $this->fetchLatestVersion();
 
         if ($latest === null) {
+            if ($this->githubReachable) {
+                // GitHub responded but no releases/tags have been published yet.
+                // Just run the install script which always pulls the latest main branch.
+                if ($checkOnly) {
+                    if ($this->jsonMode) {
+                        $this->outputJson(['current_version' => $current, 'latest_version' => null, 'note' => 'No releases published yet']);
+                    } else {
+                        $this->out("\n  \033[2mNo releases published yet. ubxcert tracks the latest main branch.\033[0m\n");
+                    }
+                    return 0;
+                }
+                if (!$this->jsonMode) {
+                    $this->out("  No version tags found — installing from latest main branch...\n");
+                }
+                return $this->runInstall('latest');
+            }
+
             if ($this->jsonMode) {
                 $this->outputJson(['error' => 'Could not reach GitHub API to check for updates']);
             } else {
@@ -259,6 +279,9 @@ class SelfUpdateCommand extends BaseCommand
             $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
             curl_close($ch);
 
+            if ($body !== false && $code > 0) {
+                $this->githubReachable = true;
+            }
             if ($body !== false && $code >= 200 && $code < 300) {
                 return (string) $body;
             }
@@ -279,6 +302,10 @@ class SelfUpdateCommand extends BaseCommand
         ]);
 
         $body = @file_get_contents($url, false, $ctx);
-        return $body !== false ? $body : null;
+        if ($body !== false) {
+            $this->githubReachable = true;
+            return $body;
+        }
+        return null;
     }
 }
