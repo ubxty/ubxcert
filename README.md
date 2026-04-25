@@ -144,8 +144,10 @@ ubxcert wizard --staging   # safe dry-run against LE staging
 | `status` | Show order/challenge state for a single domain |
 | `server` | Scan vhosts, detect web server, show SSL health per domain |
 | `doctor` | Health check: PHP, extensions, binary, dirs, cron, cert health |
+| `scan` | Diagnostic: list all vhost config files and parsed domains |
 | `wizard` | Interactive TUI: detect server, pick site, issue + install cert |
 | `migrate` | Migrate certbot-managed certs to ubxcert management |
+| `self-update` | Update ubxcert to the latest version from GitHub |
 
 All commands support `--help` and `--json`.
 
@@ -369,6 +371,37 @@ All commands accept:
 
 ---
 
+## Additional Commands
+
+### `ubxcert scan`
+
+```
+ubxcert scan
+ubxcert scan --json
+```
+
+Diagnostic tool — lists all vhost configuration files found in `sites-enabled/` and `conf.d/`, along with their parsed domain names. Useful for debugging why a domain is not appearing in `ubxcert server` or `ubxcert list`.
+
+### `ubxcert self-update`
+
+```
+ubxcert self-update
+ubxcert --version --check
+```
+
+Downloads and installs the latest release from GitHub. The `--version --check` flag compares the running version against the latest GitHub release without updating.
+
+---
+
 ## License
 
 MIT © [Ubxty](https://ubxty.com)
+
+---
+
+## Author
+
+**Ravdeep Singh**  
+Lead Developer, Ubxty  
+[linkedin.com/in/ravdeep-singh-a4544abb](https://www.linkedin.com/in/ravdeep-singh-a4544abb/)  
+[info.ubxty@gmail.com](mailto:info.ubxty@gmail.com)
