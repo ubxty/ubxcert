@@ -1,0 +1,6 @@
+vendor/
+.env
+*.log
+*.swp
+.DS_Store
+temp/

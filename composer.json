@@ -1,0 +1,37 @@
+{
+    "name": "ubxty/ubxcert",
+    "description": "Direct ACME v2 / Let's Encrypt client with resumable DNS-01 sessions — a modern, dependency-free replacement for certbot",
+    "version": "1.0.0",
+    "type": "project",
+    "license": "MIT",
+    "keywords": ["acme", "letsencrypt", "ssl", "wildcard", "dns-01", "certbot", "certificate", "cli"],
+    "homepage": "https://github.com/ubxty/ubxcert",
+    "authors": [
+        {
+            "name": "Ravdeep Singh",
+            "email": "info.ubxty@gmail.com",
+            "homepage": "https://www.linkedin.com/in/ravdeep-singh-a4544abb/",
+            "role": "Lead Developer"
+        }
+    ],
+    "support": {
+        "issues": "https://github.com/ubxty/ubxcert/issues",
+        "source": "https://github.com/ubxty/ubxcert"
+    },
+    "require": {
+        "php": "^8.1",
+        "ext-openssl": "*",
+        "ext-json": "*",
+        "ext-curl": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Ubxty\\UbxCert\\": "src/"
+        }
+    },
+    "bin": ["bin/ubxcert"],
+    "config": {
+        "optimize-autoloader": true,
+        "sort-packages": true
+    }
+}
