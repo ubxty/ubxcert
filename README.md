@@ -44,7 +44,7 @@
 ### One-liner (recommended)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ubxty/ubxcert/main/install-ubxcert.sh)
+curl -fsSL https://raw.githubusercontent.com/ubxty/ubxcert/main/install-ubxcert.sh | sudo bash
 ```
 
 ### From local source
