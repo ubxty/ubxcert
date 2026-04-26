@@ -17,6 +17,7 @@ use Ubxty\UbxCert\Commands\ScanCommand;
 use Ubxty\UbxCert\Commands\ScanServerCommand;
 use Ubxty\UbxCert\Commands\SelfUpdateCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
+use Ubxty\UbxCert\Commands\VerifyDnsCommand;
 use Ubxty\UbxCert\Commands\WizardCommand;
 
 /**
@@ -40,6 +41,7 @@ class Application
     public function __construct()
     {
         $this->register(new RequestCommand());
+        $this->register(new VerifyDnsCommand());
         $this->register(new CompleteCommand());
         $this->register(new InstallWebserverCommand());
         $this->register(new RenewCommand());
@@ -186,6 +188,7 @@ class Application
 
   \033[1mCertificate lifecycle:\033[0m
     \033[36mrequest\033[0m    Create ACME order and print DNS-01 TXT challenge values
+    \033[36mverify-dns\033[0m Read-only DNS check for the saved order's TXT challenges (no ACME calls)
     \033[36mcomplete\033[0m   Verify DNS, finalize order, download + save certificate
     \033[36minstall\033[0m    Inject certificate into web server vhost and reload
     \033[36mrenew\033[0m      Renew one or all certificates expiring within N days
@@ -274,6 +277,31 @@ HELP;
 
 \033[1mNext step:\033[0m
   ubxcert complete --domain example.com --wait-dns 600
+T,
+
+            'verify-dns' => <<<T
+\033[1mubxcert verify-dns\033[0m — Read-only DNS check for the saved order's TXT challenges
+
+\033[1mUsage:\033[0m
+  ubxcert verify-dns --domain example.com
+  ubxcert verify-dns --domain example.com --json
+  ubxcert verify-dns --domain example.com --resolver 8.8.8.8 --resolver 1.1.1.1
+
+\033[1mOptions:\033[0m
+  --domain     \033[2mBase domain (must match domain used in 'request')\033[0m
+  --resolver   \033[2mDNS resolver to query (repeatable; default: 8.8.8.8, 1.1.1.1, 8.8.4.4)\033[0m
+  --json       \033[2mMachine-readable JSON output\033[0m
+
+\033[1mWhat it does:\033[0m
+  Looks up the saved order state on disk and queries the listed
+  resolvers for each expected DNS-01 TXT challenge value. Reports
+  which records are visible. Never contacts the ACME server and
+  never mutates state — safe to call repeatedly.
+
+\033[1mExit codes:\033[0m
+  0  All expected TXT values visible — safe to run 'ubxcert complete'.
+  2  DNS not yet propagated — wait and retry.
+  1  Usage / state error.
 T,
 
             'complete' => <<<T
