@@ -92,10 +92,10 @@ class ListCommand extends BaseCommand
                 $certDir  = $this->state->getCertDir($domain);
 
                 $certPath    = $certDir . '/cert.pem';
-                [, , $wildcard] = $this->readCertInfo($certPath);
+                [, $sans, $wildcard] = $this->readCertInfo($certPath);
                 $installedOn = VhostScanner::domainSslWebserver($domain);
 
-                $rows[]        = $this->buildRow($domain, 'ubxcert', $certDir, $expiry, $daysLeft, $renewal, $order['order_status'] ?? 'valid', [], $wildcard, $installedOn);
+                $rows[]        = $this->buildRow($domain, 'ubxcert', $certDir, $expiry, $daysLeft, $renewal, $order['order_status'] ?? 'valid', $sans, $wildcard, $installedOn);
                 $seen[$domain] = true;
             }
         }
