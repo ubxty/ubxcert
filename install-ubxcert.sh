@@ -86,30 +86,32 @@ fi
 PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
 info "PHP version: ${PHP_VERSION}"
 
-# Check required extensions — auto-install any that are missing
+# Check required extensions — use extension_loaded() for reliable detection
+# (php -m output format varies between contexts; extension_loaded() is definitive)
+ext_loaded() { php -r "exit(extension_loaded('$1') ? 0 : 1);" 2>/dev/null; }
+
 MISSING_EXTS=()
 for EXT in openssl json curl; do
-    if ! php -m 2>/dev/null | grep -qi "^${EXT}$"; then
-        MISSING_EXTS+=("$EXT")
-    fi
+    ext_loaded "$EXT" || MISSING_EXTS+=("$EXT")
 done
 
 if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
     info "Missing PHP extensions: ${MISSING_EXTS[*]} — installing..."
     if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
-        # Step 1: try phpenmod (extension is installed but disabled in CLI ini)
+        # Step 1: try phpenmod (extension present but disabled in CLI ini)
         for EXT in "${MISSING_EXTS[@]}"; do
             phpenmod -s cli "$EXT" 2>/dev/null || true
         done
         # Step 2: install any still-missing packages via apt
         STILL_MISSING=()
         for EXT in "${MISSING_EXTS[@]}"; do
-            php -m 2>/dev/null | grep -qi "^${EXT}$" || STILL_MISSING+=("$EXT")
+            ext_loaded "$EXT" || STILL_MISSING+=("$EXT")
         done
         if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
-            apt-get update -qq
+            # Ignore repo errors (e.g. forbidden/unsigned PPAs) — packages may still install
+            apt-get update -qq 2>/dev/null || true
             for EXT in "${STILL_MISSING[@]}"; do
-                # Map extensions that are virtual packages to their real package name
+                # Map extensions whose apt package name differs from the extension name
                 case "$EXT" in
                     json)    PKG="php${PHP_VERSION}-cli" ;;
                     openssl) PKG="php${PHP_VERSION}-common" ;;
@@ -127,9 +129,9 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
     fi
     # Final verification — fail loudly if we still can't satisfy a requirement
     for EXT in "${MISSING_EXTS[@]}"; do
-        if ! php -m 2>/dev/null | grep -qi "^${EXT}$"; then
+        if ! ext_loaded "$EXT"; then
             red "PHP extension '${EXT}' could not be installed automatically."
-            red "Run manually: apt-get install php${PHP_VERSION}-${EXT} php${PHP_VERSION}-xml"
+            red "Run manually: apt-get install php${PHP_VERSION}-cli php${PHP_VERSION}-curl"
             exit 1
         fi
     done
