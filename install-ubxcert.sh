@@ -86,13 +86,49 @@ fi
 PHP_VERSION=$(php -r 'echo PHP_MAJOR_VERSION . "." . PHP_MINOR_VERSION;')
 info "PHP version: ${PHP_VERSION}"
 
-# Check required extensions
+# Check required extensions — auto-install any that are missing
+MISSING_EXTS=()
 for EXT in openssl json curl; do
-    if ! php -m | grep -qi "^${EXT}$"; then
-        red "PHP extension '${EXT}' is missing. Install php-${EXT} and retry."
-        exit 1
+    if ! php -m 2>/dev/null | grep -qi "^${EXT}$"; then
+        MISSING_EXTS+=("$EXT")
     fi
 done
+
+if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
+    info "Missing PHP extensions: ${MISSING_EXTS[*]} — installing..."
+    if [ "$OS_ID" = "ubuntu" ] || [ "$OS_ID" = "debian" ]; then
+        # Step 1: try phpenmod (extension is installed but disabled in CLI ini)
+        for EXT in "${MISSING_EXTS[@]}"; do
+            phpenmod -s cli "$EXT" 2>/dev/null || true
+        done
+        # Step 2: install any still-missing packages via apt
+        STILL_MISSING=()
+        for EXT in "${MISSING_EXTS[@]}"; do
+            php -m 2>/dev/null | grep -qi "^${EXT}$" || STILL_MISSING+=("$EXT")
+        done
+        if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
+            apt-get update -qq
+            for EXT in "${STILL_MISSING[@]}"; do
+                apt-get install -y -qq "php${PHP_VERSION}-${EXT}" 2>/dev/null || \
+                apt-get install -y -qq "php-${EXT}" 2>/dev/null || true
+                phpenmod -s cli "$EXT" 2>/dev/null || true
+            done
+        fi
+    elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "rocky" ]; then
+        for EXT in "${MISSING_EXTS[@]}"; do
+            yum install -y "php-${EXT}" 2>/dev/null || true
+        done
+    fi
+    # Final verification — fail loudly if we still can't satisfy a requirement
+    for EXT in "${MISSING_EXTS[@]}"; do
+        if ! php -m 2>/dev/null | grep -qi "^${EXT}$"; then
+            red "PHP extension '${EXT}' could not be installed automatically."
+            red "Run manually: apt-get install php${PHP_VERSION}-${EXT} php${PHP_VERSION}-xml"
+            exit 1
+        fi
+    done
+    info "All required PHP extensions are now available."
+fi
 
 # -------------------------------------------------------------------------
 # Install Composer if missing
