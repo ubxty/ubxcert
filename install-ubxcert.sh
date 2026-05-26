@@ -109,7 +109,13 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
         if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
             apt-get update -qq
             for EXT in "${STILL_MISSING[@]}"; do
-                apt-get install -y -qq "php${PHP_VERSION}-${EXT}" 2>/dev/null || \
+                # Map extensions that are virtual packages to their real package name
+                case "$EXT" in
+                    json)    PKG="php${PHP_VERSION}-cli" ;;
+                    openssl) PKG="php${PHP_VERSION}-common" ;;
+                    *)       PKG="php${PHP_VERSION}-${EXT}" ;;
+                esac
+                apt-get install -y -qq "$PKG" 2>/dev/null || \
                 apt-get install -y -qq "php-${EXT}" 2>/dev/null || true
                 phpenmod -s cli "$EXT" 2>/dev/null || true
             done
