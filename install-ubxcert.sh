@@ -108,7 +108,10 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
             ext_loaded "$EXT" || STILL_MISSING+=("$EXT")
         done
         if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
-            # Suppress all apt-get update output — broken PPAs (403, unsigned) must not abort install
+            # Remove any broken ondrej/nginx source that causes 403 errors — it is
+            # unrelated to PHP and its failure must not block PHP package installs.
+            find /etc/apt/sources.list.d/ -maxdepth 1 -name "*ondrej*nginx*" -delete 2>/dev/null || true
+            # Suppress all apt-get update output — a single failing repo must not abort install
             apt-get update -qq > /dev/null 2>&1 || true
             for EXT in "${STILL_MISSING[@]}"; do
                 # Map extensions whose apt package name differs from the extension name
@@ -117,7 +120,6 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
                     openssl) PKG="php${PHP_VERSION}-common" ;;
                     *)       PKG="php${PHP_VERSION}-${EXT}" ;;
                 esac
-                # Try install without update first, then with update if needed
                 apt-get install -y -qq "$PKG" > /dev/null 2>&1 || \
                 apt-get install -y -qq "php-${EXT}" > /dev/null 2>&1 || true
                 phpenmod -s cli "$EXT" > /dev/null 2>&1 || true
