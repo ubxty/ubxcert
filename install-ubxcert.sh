@@ -110,7 +110,8 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
         if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
             # Remove any broken ondrej/nginx source that causes 403 errors — it is
             # unrelated to PHP and its failure must not block PHP package installs.
-            find /etc/apt/sources.list.d/ -maxdepth 1 -name "*ondrej*nginx*" -delete 2>/dev/null || true
+            find /etc/apt/sources.list.d/ -maxdepth 1 \( -name "*ondrej*nginx*" -o -name "*nginx*ondrej*" \) \
+                \( -name "*.list" -o -name "*.sources" \) -delete 2>/dev/null || true
             # Suppress all apt-get update output — a single failing repo must not abort install
             apt-get update -qq > /dev/null 2>&1 || true
             for EXT in "${STILL_MISSING[@]}"; do
