@@ -88,7 +88,8 @@ info "PHP version: ${PHP_VERSION}"
 
 # Check required extensions — use extension_loaded() for reliable detection
 # (php -m output format varies between contexts; extension_loaded() is definitive)
-ext_loaded() { php -r "exit(extension_loaded('$1') ? 0 : 1);" 2>/dev/null; }
+# $argv is used to pass the name so the shell value never interpolates into PHP code.
+ext_loaded() { php -r 'exit(extension_loaded($argv[1]) ? 0 : 1);' -- "$1" 2>/dev/null; }
 
 MISSING_EXTS=()
 for EXT in openssl json curl; do
@@ -147,18 +148,21 @@ fi
 # -------------------------------------------------------------------------
 if ! command -v composer &>/dev/null; then
     info "Composer not found — installing..."
+    # Use a root-only temp dir to prevent local users from racing the checksum/exec window
+    COMPOSER_TMP=$(mktemp -d)
+    chmod 700 "$COMPOSER_TMP"
     EXPECTED_CHECKSUM="$(php -r 'copy("https://composer.github.io/installer.sig", "php://stdout");')"
-    php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');"
-    ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', 'composer-setup.php');")"
+    php -r "copy('https://getcomposer.org/installer', '${COMPOSER_TMP}/composer-setup.php');"
+    ACTUAL_CHECKSUM="$(php -r "echo hash_file('sha384', '${COMPOSER_TMP}/composer-setup.php');")"
 
     if [ "$EXPECTED_CHECKSUM" != "$ACTUAL_CHECKSUM" ]; then
-        rm -f composer-setup.php
+        rm -rf "$COMPOSER_TMP"
         red "Composer installer checksum mismatch!"
         exit 1
     fi
 
-    php composer-setup.php --quiet --install-dir=/usr/local/bin --filename=composer
-    rm -f composer-setup.php
+    php "${COMPOSER_TMP}/composer-setup.php" --quiet --install-dir=/usr/local/bin --filename=composer
+    rm -rf "$COMPOSER_TMP"
 fi
 
 info "Composer version: $(composer --version --no-ansi 2>/dev/null | head -1)"
@@ -238,7 +242,13 @@ mkdir -p /etc/letsencrypt/archive
 # Add /usr/local/bin to PATH in /etc/profile.d/ (in case it's not there)
 # -------------------------------------------------------------------------
 if ! grep -q '/usr/local/bin' /etc/environment 2>/dev/null; then
-    echo 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' > /etc/environment
+    # Modify only the PATH line rather than overwriting the whole file (avoids
+    # destroying other env vars like JAVA_HOME, LANG, etc.)
+    if grep -q '^PATH=' /etc/environment 2>/dev/null; then
+        sed -i 's|^PATH=.*|PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"|' /etc/environment
+    else
+        echo 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' >> /etc/environment
+    fi
 fi
 
 # Ensure it's in root's .bashrc / .bash_profile
