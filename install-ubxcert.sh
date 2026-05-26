@@ -108,8 +108,8 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
             ext_loaded "$EXT" || STILL_MISSING+=("$EXT")
         done
         if [ "${#STILL_MISSING[@]}" -gt 0 ]; then
-            # Ignore repo errors (e.g. forbidden/unsigned PPAs) — packages may still install
-            apt-get update -qq 2>/dev/null || true
+            # Suppress all apt-get update output — broken PPAs (403, unsigned) must not abort install
+            apt-get update -qq > /dev/null 2>&1 || true
             for EXT in "${STILL_MISSING[@]}"; do
                 # Map extensions whose apt package name differs from the extension name
                 case "$EXT" in
@@ -117,9 +117,10 @@ if [ "${#MISSING_EXTS[@]}" -gt 0 ]; then
                     openssl) PKG="php${PHP_VERSION}-common" ;;
                     *)       PKG="php${PHP_VERSION}-${EXT}" ;;
                 esac
-                apt-get install -y -qq "$PKG" 2>/dev/null || \
-                apt-get install -y -qq "php-${EXT}" 2>/dev/null || true
-                phpenmod -s cli "$EXT" 2>/dev/null || true
+                # Try install without update first, then with update if needed
+                apt-get install -y -qq "$PKG" > /dev/null 2>&1 || \
+                apt-get install -y -qq "php-${EXT}" > /dev/null 2>&1 || true
+                phpenmod -s cli "$EXT" > /dev/null 2>&1 || true
             done
         fi
     elif [ "$OS_ID" = "centos" ] || [ "$OS_ID" = "rhel" ] || [ "$OS_ID" = "almalinux" ] || [ "$OS_ID" = "rocky" ]; then
