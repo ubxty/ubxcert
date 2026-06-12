@@ -7,6 +7,7 @@ namespace Ubxty\UbxCert;
 use Throwable;
 use Ubxty\UbxCert\Commands\BaseCommand;
 use Ubxty\UbxCert\Commands\CompleteCommand;
+use Ubxty\UbxCert\Commands\DeleteCommand;
 use Ubxty\UbxCert\Commands\DoctorCommand;
 use Ubxty\UbxCert\Commands\InstallWebserverCommand;
 use Ubxty\UbxCert\Commands\ListCommand;
@@ -44,6 +45,7 @@ class Application
         $this->register(new VerifyDnsCommand());
         $this->register(new CompleteCommand());
         $this->register(new InstallWebserverCommand());
+        $this->register(new DeleteCommand());
         $this->register(new RenewCommand());
         $this->register(new ListCommand());
         $this->register(new StatusCommand());
@@ -192,6 +194,7 @@ class Application
     \033[36mcomplete\033[0m   Verify challenge (DNS or HTTP), finalize order, download + save certificate
     \033[36minstall\033[0m    Inject certificate into web server vhost and reload
     \033[36mrenew\033[0m      Renew one or all certificates expiring within N days
+    \033[36mdelete\033[0m     Delete a certificate and its order state (idempotent; supports --all)
 
   \033[1mInspection:\033[0m
     \033[36mlist\033[0m       List ALL certificates — ubxcert + certbot (wildcard detection, webserver column)
@@ -415,6 +418,43 @@ T,
 \033[1mOutput columns:\033[0m
   DOMAIN   SOURCE   STATUS   EXPIRES   DAYS
   Expiry is colour-coded: \033[32mgreen\033[0m = healthy, \033[33myellow\033[0m = <30d, \033[31mred\033[0m = <14d or expired
+T,
+
+            'delete' => <<<T
+\033[1mubxcert delete\033[0m — Remove a certificate and its order state
+
+\033[1mUsage:\033[0m
+  ubxcert delete --domain example.com
+  ubxcert delete --domain example.com --purge
+  ubxcert delete --domain example.com --keep-cert
+  ubxcert delete --all
+  ubxcert delete --all --purge --json
+
+\033[1mOptions:\033[0m
+  --domain        \033[2mDomain whose cert + state to remove\033[0m
+  --all           \033[2mRemove every domain found under /etc/ubxcert/{certs,orders}/\033[0m
+  --purge         \033[2mAlso remove /etc/letsencrypt/live/<domain>/ symlink dir and renewal/<domain>.conf\033[0m
+  --keep-cert     \033[2mPreserve cert files; only clear order state\033[0m
+  --keep-state    \033[2mPreserve order state; only remove cert files\033[0m
+  --certbot       \033[2mAlso invoke `certbot delete --cert-name <domain>` (for legacy certbot-managed certs)\033[0m
+  --json          \033[2mMachine-readable JSON output\033[0m
+
+\033[1mBehavior:\033[0m
+  Idempotent. Returns exit 0 when there's nothing to delete, so a
+  script can call this without pre-checking existence. The JSON
+  shape is:
+    {
+      "command": "delete",
+      "domains": [{ "domain": ..., "cert_removed_count": N, "state_removed_count": N, "errors": [] }],
+      "deleted_count": N,
+      "noop_count": N,
+      "succeeded": true
+    }
+
+\033[1mExit codes:\033[0m
+  0  Every domain either succeeded or was a no-op
+  1  Validation error (missing args, conflicting flags)
+  1  Unrecoverable error (unreadable dir, certbot missing with --certbot)
 T,
 
             'status' => <<<T
