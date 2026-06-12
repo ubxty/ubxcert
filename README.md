@@ -24,6 +24,7 @@
 | Interactive wizard | ✅ | ❌ |
 | Health check (`doctor`) | ✅ | ❌ |
 | Migrate certbot certs | ✅ | n/a |
+| Idempotent delete (`delete`) | ✅ | ❌ (errors if missing) |
 | JSON output on every command | ✅ | partial |
 
 ---
@@ -158,6 +159,7 @@ ubxcert wizard --staging   # safe dry-run against LE staging
 | `complete` | Verify challenge (DNS or HTTP), finalize order, download + save certificate |
 | `install` | Inject cert into web server vhost and reload |
 | `renew` | Renew one or all certs expiring within N days |
+| `delete` | Delete a cert + its order state (idempotent; supports --all bulk) |
 | `list` | List ALL certs (ubxcert + certbot), wildcard + server columns |
 | `status` | Show order/challenge state for a single domain |
 | `server` | Scan vhosts, detect web server, show SSL health per domain |
@@ -243,6 +245,42 @@ ubxcert renew --all --cf-token $CF_TOKEN --cf-zone-id $CF_ZONE_ID --webserver ng
 | `--cf-token` | Cloudflare API token for automated DNS-01 |
 | `--cf-zone-id` | Cloudflare Zone ID (required with `--cf-token`) |
 | `--webserver` | Web server to reload after renewal |
+
+### `ubxcert delete`
+
+```
+ubxcert delete --domain example.com
+ubxcert delete --domain example.com --purge
+ubxcert delete --domain example.com --keep-cert
+ubxcert delete --all
+ubxcert delete --all --purge --json
+```
+
+| Option | Description |
+|---|---|
+| `--domain` | Domain whose cert + state to remove |
+| `--all` | Remove every domain found under `/etc/ubxcert/{certs,orders}/` |
+| `--purge` | Also remove `/etc/letsencrypt/live/<domain>/` symlink dir and `renewal/<domain>.conf` |
+| `--keep-cert` | Preserve cert files; only clear order state |
+| `--keep-state` | Preserve order state; only remove cert files |
+| `--certbot` | Also invoke `certbot delete --cert-name <domain>` (for legacy certbot-managed certs) |
+| `--json` | Machine-readable JSON output |
+
+**Behavior:** idempotent. Returns exit 0 when there's nothing to delete, so a script can call this without pre-checking existence. The JSON shape is:
+
+```json
+{
+  "command": "delete",
+  "domains": [{ "domain": ..., "cert_removed_count": N, "state_removed_count": N, "errors": [] }],
+  "deleted_count": N,
+  "noop_count": N,
+  "succeeded": true
+}
+```
+
+**Exit codes:** 0 = every domain either succeeded or was a no-op. 1 = validation error (missing args, conflicting flags) or unrecoverable error (unreadable dir, certbot missing with `--certbot`).
+
+Use case: bulk cleanup after migration, or making a clean handoff back to certbot. The CloudPanzer panel's `permanent_delete_ssl.sh` calls this in lieu of `certbot delete` (which fails with "Certificate not found" when the cert is ubxcert-managed and not in certbot's store).
 
 ### `ubxcert list`
 

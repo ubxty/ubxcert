@@ -21,7 +21,24 @@ use RuntimeException;
  */
 class StateManager
 {
-    private const BASE_DIR = '/etc/ubxcert';
+    /**
+     * Default base directory for state. Overridable for testing
+     * via the constructor. Production code should not change this
+     * — the install-ubxcert.sh installer assumes /etc/ubxcert.
+     */
+    private const DEFAULT_BASE_DIR = '/etc/ubxcert';
+
+    private string $baseDir;
+
+    public function __construct(?string $baseDir = null)
+    {
+        $this->baseDir = $baseDir ?? self::DEFAULT_BASE_DIR;
+    }
+
+    public function getBaseDir(): string
+    {
+        return $this->baseDir;
+    }
 
     // -------------------------------------------------------------------------
     // Account helpers
@@ -30,7 +47,7 @@ class StateManager
     public function getAccountDir(string $email): string
     {
         $safe = preg_replace('/[^a-zA-Z0-9._-]/', '-', $email);
-        return self::BASE_DIR . "/accounts/{$safe}";
+        return $this->baseDir . "/accounts/{$safe}";
     }
 
     public function getAccountKeyPath(string $email): string
@@ -64,7 +81,7 @@ class StateManager
     public function getOrderDir(string $domain): string
     {
         $safe = preg_replace('/[^a-zA-Z0-9._-]/', '-', $domain);
-        return self::BASE_DIR . "/orders/{$safe}";
+        return $this->baseDir . "/orders/{$safe}";
     }
 
     public function getOrderCertKeyPath(string $domain): string
@@ -104,6 +121,9 @@ class StateManager
                 unlink($file);
             }
         }
+        // Best-effort: remove the now-empty dir. Silently skip
+        // if it has subdirs or we lack permission.
+        @rmdir($dir);
     }
 
     // -------------------------------------------------------------------------
@@ -113,7 +133,7 @@ class StateManager
     public function getCertDir(string $domain): string
     {
         $safe = preg_replace('/[^a-zA-Z0-9._-]/', '-', $domain);
-        return self::BASE_DIR . "/certs/{$safe}";
+        return $this->baseDir . "/certs/{$safe}";
     }
 
     public function certExists(string $domain): bool
@@ -123,21 +143,62 @@ class StateManager
 
     public function listCertDomains(): array
     {
-        $base = self::BASE_DIR . '/certs';
+        $base = $this->baseDir . '/certs';
         if (!is_dir($base)) {
             return [];
         }
         return array_map('basename', glob($base . '/*', GLOB_ONLYDIR) ?: []);
     }
 
+    /**
+     * Recursively delete the certificate directory for $domain.
+     * Returns the list of file paths that were actually removed
+     * (empty if nothing existed). Symlinks are removed, not
+     * followed.
+     *
+     * @return string[]
+     */
+    public function deleteCertDir(string $domain): array
+    {
+        $dir = $this->getCertDir($domain);
+        if (!is_dir($dir)) {
+            return [];
+        }
+        $removed = [];
+        $this->rmTree($dir, $removed);
+        return $removed;
+    }
+
+    /**
+     * Recursive delete that captures what it removed so the caller
+     * can report it. Skips entries that cannot be removed so a
+     * single permission error doesn't mask other removals.
+     */
+    private function rmTree(string $path, array &$removed): void
+    {
+        if (is_link($path) || is_file($path)) {
+            if (@unlink($path)) {
+                $removed[] = $path;
+            }
+            return;
+        }
+        if (!is_dir($path)) {
+            return;
+        }
+        foreach (scandir($path) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..') {
+                continue;
+            }
+            $this->rmTree($path . '/' . $entry, $removed);
+        }
+        if (@rmdir($path)) {
+            $removed[] = $path;
+        }
+    }
+
     // -------------------------------------------------------------------------
     // Utilities
     // -------------------------------------------------------------------------
-
-    public function getBaseDir(): string
-    {
-        return self::BASE_DIR;
-    }
 
     private function ensureDir(string $dir, int $mode = 0755): void
     {
