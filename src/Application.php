@@ -7,6 +7,7 @@ namespace Ubxty\UbxCert;
 use Throwable;
 use Ubxty\UbxCert\Commands\BaseCommand;
 use Ubxty\UbxCert\Commands\CompleteCommand;
+use Ubxty\UbxCert\Commands\DeleteCommand;
 use Ubxty\UbxCert\Commands\DoctorCommand;
 use Ubxty\UbxCert\Commands\InstallWebserverCommand;
 use Ubxty\UbxCert\Commands\ListCommand;
@@ -44,6 +45,7 @@ class Application
         $this->register(new VerifyDnsCommand());
         $this->register(new CompleteCommand());
         $this->register(new InstallWebserverCommand());
+        $this->register(new DeleteCommand());
         $this->register(new RenewCommand());
         $this->register(new ListCommand());
         $this->register(new StatusCommand());
@@ -187,11 +189,12 @@ class Application
           ubxcert help <command>     per-command reference
 
   \033[1mCertificate lifecycle:\033[0m
-    \033[36mrequest\033[0m    Create ACME order and print DNS-01 TXT challenge values
+    \033[36mrequest\033[0m    Create ACME order and print challenge values (DNS-01 or HTTP-01)
     \033[36mverify-dns\033[0m Read-only DNS check for the saved order's TXT challenges (no ACME calls)
-    \033[36mcomplete\033[0m   Verify DNS, finalize order, download + save certificate
+    \033[36mcomplete\033[0m   Verify challenge (DNS or HTTP), finalize order, download + save certificate
     \033[36minstall\033[0m    Inject certificate into web server vhost and reload
     \033[36mrenew\033[0m      Renew one or all certificates expiring within N days
+    \033[36mdelete\033[0m     Delete a certificate and its order state (idempotent; supports --all)
 
   \033[1mInspection:\033[0m
     \033[36mlist\033[0m       List ALL certificates — ubxcert + certbot (wildcard detection, webserver column)
@@ -216,8 +219,14 @@ class Application
     \033[2m# 1. Request a wildcard cert — prints DNS TXT records to add\033[0m
     ubxcert request --domains "*.example.com,example.com" --email admin@example.com
 
-    \033[2m# 2. Add the TXT records in your DNS, then complete the order\033[0m
+    \033[2m# 1b. OR request a single-domain cert via HTTP-01 (no DNS work needed)\033[0m
+    ubxcert request --domains "example.com" --email admin@example.com --challenge http
+    \033[2m#    → returns the token + key authorization as JSON; serve at\033[0m
+    \033[2m#      http://example.com/.well-known/acme-challenge/<token>\033[0m
+
+    \033[2m# 2. Add the TXT records / serve the HTTP file, then complete the order\033[0m
     ubxcert complete --domain example.com --wait-dns 600
+    ubxcert complete --domain example.com --challenge http --wait-http 60
 
     \033[2m# 3. Install into your web server\033[0m
     ubxcert install  --domain example.com --webserver openresty
@@ -255,28 +264,34 @@ HELP;
     {
         return [
             'request' => <<<T
-\033[1mubxcert request\033[0m — Create an ACME order and print DNS-01 TXT challenge values
+\033[1mubxcert request\033[0m — Create an ACME order and print challenge values
 
 \033[1mUsage:\033[0m
   ubxcert request --domains "*.example.com,example.com" --email admin@example.com
   ubxcert request --domains "site.com" --email admin@site.com --staging
   ubxcert request --domains "*.example.com,example.com" --email admin@example.com --force
+  ubxcert request --domains "example.com" --email admin@example.com --challenge http
 
 \033[1mOptions:\033[0m
-  --domains   \033[2mComma-separated list of domains (wildcard supported)\033[0m
-  --email     \033[2mACME account email (used for Let's Encrypt notices)\033[0m
-  --force     \033[2mDiscard any existing pending order and create a fresh one\033[0m
-  --staging   \033[2mUse Let's Encrypt staging (no rate limits, fake cert)\033[0m
-  --json      \033[2mOutput challenge data as JSON\033[0m
+  --domains    \033[2mComma-separated list of domains (wildcard supported with --challenge dns only)\033[0m
+  --email      \033[2mACME account email (used for Let's Encrypt notices)\033[0m
+  --challenge  \033[2mChallenge type: dns (default) or http. HTTP-01 is faster (no DNS propagation)
+                but does not support wildcard domains. Single-domain certs only.\033[0m
+  --force      \033[2mDiscard any existing pending order and create a fresh one\033[0m
+  --staging    \033[2mUse Let's Encrypt staging (no rate limits, fake cert)\033[0m
+  --json       \033[2mOutput challenge data as JSON\033[0m
 
 \033[1mWhat it does:\033[0m
   1. Registers (or re-uses) a Let's Encrypt account for --email
   2. Creates a new ACME order for all supplied domains
-  3. Computes the DNS-01 TXT record values
-  4. Prints them — you add these to your DNS
+  3. Computes the challenge values (DNS-01 TXT records OR HTTP-01 file body)
+  4. Prints them — for DNS-01, add the TXT records to your DNS;
+     for HTTP-01, serve the file at /.well-known/acme-challenge/<token>
+     on the domain itself (port 80)
 
 \033[1mNext step:\033[0m
   ubxcert complete --domain example.com --wait-dns 600
+  ubxcert complete --domain example.com --challenge http --wait-http 60
 T,
 
             'verify-dns' => <<<T
@@ -305,22 +320,27 @@ T,
 T,
 
             'complete' => <<<T
-\033[1mubxcert complete\033[0m — Verify DNS, finalize order, download certificate
+\033[1mubxcert complete\033[0m — Verify challenge, finalize order, download certificate
 
 \033[1mUsage:\033[0m
   ubxcert complete --domain example.com
   ubxcert complete --domain example.com --wait-dns 600
   ubxcert complete --domain example.com --wait-dns 600 --staging
+  ubxcert complete --domain example.com --challenge http --wait-http 60
 
 \033[1mOptions:\033[0m
   --domain     \033[2mBase domain (must match domain used in 'request')\033[0m
-  --wait-dns   \033[2mSeconds to poll DNS for TXT propagation (default: 0 = no wait)\033[0m
+  --challenge  \033[2mOverride challenge type detection (dns or http). Usually inferred
+                from the saved order state. Must match what was used in 'request'.\033[0m
+  --wait-dns   \033[2mSeconds to poll DNS for TXT propagation (default: 0 = no wait, DNS-01 only)\033[0m
+  --wait-http  \033[2mSeconds to poll the HTTP-01 endpoint for the challenge file (default: 0)\033[0m
   --staging    \033[2mMust match the flag used in 'request'\033[0m
   --json       \033[2mOutput certificate details as JSON\033[0m
 
 \033[1mWhat it does:\033[0m
   1. Loads the order state saved by 'request'
-  2. Optionally polls DNS until TXT records are visible
+  2. Optionally polls DNS (DNS-01) or the http://<domain>/.well-known/acme-challenge/<token>
+     endpoint (HTTP-01) until the challenge value is reachable
   3. Notifies ACME challenges are ready
   4. Polls until all authorisations are valid
   5. Submits a CSR, finalises the order
@@ -398,6 +418,43 @@ T,
 \033[1mOutput columns:\033[0m
   DOMAIN   SOURCE   STATUS   EXPIRES   DAYS
   Expiry is colour-coded: \033[32mgreen\033[0m = healthy, \033[33myellow\033[0m = <30d, \033[31mred\033[0m = <14d or expired
+T,
+
+            'delete' => <<<T
+\033[1mubxcert delete\033[0m — Remove a certificate and its order state
+
+\033[1mUsage:\033[0m
+  ubxcert delete --domain example.com
+  ubxcert delete --domain example.com --purge
+  ubxcert delete --domain example.com --keep-cert
+  ubxcert delete --all
+  ubxcert delete --all --purge --json
+
+\033[1mOptions:\033[0m
+  --domain        \033[2mDomain whose cert + state to remove\033[0m
+  --all           \033[2mRemove every domain found under /etc/ubxcert/{certs,orders}/\033[0m
+  --purge         \033[2mAlso remove /etc/letsencrypt/live/<domain>/ symlink dir and renewal/<domain>.conf\033[0m
+  --keep-cert     \033[2mPreserve cert files; only clear order state\033[0m
+  --keep-state    \033[2mPreserve order state; only remove cert files\033[0m
+  --certbot       \033[2mAlso invoke `certbot delete --cert-name <domain>` (for legacy certbot-managed certs)\033[0m
+  --json          \033[2mMachine-readable JSON output\033[0m
+
+\033[1mBehavior:\033[0m
+  Idempotent. Returns exit 0 when there's nothing to delete, so a
+  script can call this without pre-checking existence. The JSON
+  shape is:
+    {
+      "command": "delete",
+      "domains": [{ "domain": ..., "cert_removed_count": N, "state_removed_count": N, "errors": [] }],
+      "deleted_count": N,
+      "noop_count": N,
+      "succeeded": true
+    }
+
+\033[1mExit codes:\033[0m
+  0  Every domain either succeeded or was a no-op
+  1  Validation error (missing args, conflicting flags)
+  1  Unrecoverable error (unreadable dir, certbot missing with --certbot)
 T,
 
             'status' => <<<T

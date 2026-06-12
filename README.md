@@ -17,12 +17,14 @@
 | Language | Pure PHP 8.1+ | Python 3 + deps |
 | Two-step resumable flow | ✅ | ❌ |
 | Wildcard certs (DNS-01) | ✅ | ✅ |
+| Single-domain certs (HTTP-01) | ✅ (no DNS work needed) | ✅ |
 | ACME v2 RFC 8555 | ✅ | ✅ |
 | Zero non-PHP dependencies | ✅ | ❌ |
 | Certbot drop-in symlinks | ✅ — `/etc/letsencrypt/live/` | native |
 | Interactive wizard | ✅ | ❌ |
 | Health check (`doctor`) | ✅ | ❌ |
 | Migrate certbot certs | ✅ | n/a |
+| Idempotent delete (`delete`) | ✅ | ❌ (errors if missing) |
 | JSON output on every command | ✅ | partial |
 
 ---
@@ -65,23 +67,40 @@ ubxcert doctor
 
 ## Quick Start
 
-### 1 — Request a wildcard certificate
+### 1 — Request a certificate
 
+**Wildcard cert (DNS-01, default):**
 ```bash
 ubxcert request \
   --domains "*.example.com,example.com" \
   --email admin@example.com
 ```
-
 ubxcert prints DNS TXT challenge values — add them to your DNS provider (Cloudflare, cPanel, etc.).
 
-### 2 — Complete the order (verify DNS + download cert)
+**Single-domain cert (HTTP-01, faster, no DNS work):**
+```bash
+ubxcert request \
+  --domains "example.com" \
+  --email admin@example.com \
+  --challenge http
+```
+ubxcert prints a `token` and `key_authorization`. Serve the `key_authorization` as the body of:
+```
+http://example.com/.well-known/acme-challenge/<token>
+```
+on the domain itself, port 80. Then run the `complete` step with `--challenge http --wait-http 60`.
+
+### 2 — Complete the order (verify challenge + download cert)
 
 ```bash
+# DNS-01 (wildcard or single-domain)
 ubxcert complete --domain example.com --wait-dns 600
+
+# HTTP-01 (single-domain only)
+ubxcert complete --domain example.com --challenge http --wait-http 60
 ```
 
-`--wait-dns 600` polls DNS up to 10 minutes. The certificate is saved to `/etc/ubxcert/certs/example.com/`.
+`--wait-dns 600` polls DNS up to 10 minutes. `--wait-http 60` polls the HTTP-01 endpoint up to 60 seconds. The certificate is saved to `/etc/ubxcert/certs/example.com/`.
 
 ### 3 — Install into your web server
 
@@ -136,10 +155,11 @@ ubxcert wizard --staging   # safe dry-run against LE staging
 
 | Command | Description |
 |---|---|
-| `request` | Create ACME order; print DNS-01 TXT challenge values |
-| `complete` | Verify DNS, finalize order, download + save certificate |
+| `request` | Create ACME order; print challenge values (DNS-01 TXT or HTTP-01 file body) |
+| `complete` | Verify challenge (DNS or HTTP), finalize order, download + save certificate |
 | `install` | Inject cert into web server vhost and reload |
 | `renew` | Renew one or all certs expiring within N days |
+| `delete` | Delete a cert + its order state (idempotent; supports --all bulk) |
 | `list` | List ALL certs (ubxcert + certbot), wildcard + server columns |
 | `status` | Show order/challenge state for a single domain |
 | `server` | Scan vhosts, detect web server, show SSL health per domain |
@@ -156,26 +176,45 @@ All commands support `--help` and `--json`.
 ```
 ubxcert request --domains "*.example.com,example.com" --email admin@example.com
 ubxcert request --domains "site.com" --email admin@site.com --staging --force
+ubxcert request --domains "site.com" --email admin@site.com --challenge http
 ```
 
 | Option | Description |
 |---|---|
-| `--domains` | Comma-separated list (wildcard supported) |
+| `--domains` | Comma-separated list (wildcard supported with `--challenge dns` only) |
 | `--email` | ACME account email |
+| `--challenge` | `dns` (default) or `http`. HTTP-01 is faster (no DNS propagation) but does not support wildcards. |
 | `--force` | Discard existing pending order and start fresh |
 | `--staging` | Use LE staging (no rate limits, fake cert) |
 | `--json` | Output challenge data as JSON |
+
+For `--challenge http`, the JSON output includes, per domain:
+
+```json
+{
+  "challenge_type": "http-01",
+  "token": "<server-issued token>",
+  "key_authorization": "<token>.<account-thumbprint>",
+  "http_url": "http://example.com/.well-known/acme-challenge/<token>",
+  "challenge_path": "/.well-known/acme-challenge/<token>"
+}
+```
+
+The script-side caller writes `key_authorization` to that file path before invoking `ubxcert complete`.
 
 ### `ubxcert complete`
 
 ```
 ubxcert complete --domain example.com --wait-dns 600
+ubxcert complete --domain example.com --challenge http --wait-http 60
 ```
 
 | Option | Description |
 |---|---|
 | `--domain` | Base domain (must match the one used in `request`) |
-| `--wait-dns` | Seconds to poll DNS for TXT propagation (default: 0) |
+| `--challenge` | Override challenge type detection (`dns` or `http`). Usually inferred from the saved order state. |
+| `--wait-dns` | Seconds to poll DNS for TXT propagation (default: 0). DNS-01 only. |
+| `--wait-http` | Seconds to poll `http://<domain>/.well-known/acme-challenge/<token>` (default: 0). HTTP-01 only. |
 | `--staging` | Must match flag used in `request` |
 
 Files created: `/etc/ubxcert/certs/<domain>/{cert,chain,fullchain,privkey}.pem`  
@@ -206,6 +245,42 @@ ubxcert renew --all --cf-token $CF_TOKEN --cf-zone-id $CF_ZONE_ID --webserver ng
 | `--cf-token` | Cloudflare API token for automated DNS-01 |
 | `--cf-zone-id` | Cloudflare Zone ID (required with `--cf-token`) |
 | `--webserver` | Web server to reload after renewal |
+
+### `ubxcert delete`
+
+```
+ubxcert delete --domain example.com
+ubxcert delete --domain example.com --purge
+ubxcert delete --domain example.com --keep-cert
+ubxcert delete --all
+ubxcert delete --all --purge --json
+```
+
+| Option | Description |
+|---|---|
+| `--domain` | Domain whose cert + state to remove |
+| `--all` | Remove every domain found under `/etc/ubxcert/{certs,orders}/` |
+| `--purge` | Also remove `/etc/letsencrypt/live/<domain>/` symlink dir and `renewal/<domain>.conf` |
+| `--keep-cert` | Preserve cert files; only clear order state |
+| `--keep-state` | Preserve order state; only remove cert files |
+| `--certbot` | Also invoke `certbot delete --cert-name <domain>` (for legacy certbot-managed certs) |
+| `--json` | Machine-readable JSON output |
+
+**Behavior:** idempotent. Returns exit 0 when there's nothing to delete, so a script can call this without pre-checking existence. The JSON shape is:
+
+```json
+{
+  "command": "delete",
+  "domains": [{ "domain": ..., "cert_removed_count": N, "state_removed_count": N, "errors": [] }],
+  "deleted_count": N,
+  "noop_count": N,
+  "succeeded": true
+}
+```
+
+**Exit codes:** 0 = every domain either succeeded or was a no-op. 1 = validation error (missing args, conflicting flags) or unrecoverable error (unreadable dir, certbot missing with `--certbot`).
+
+Use case: bulk cleanup after migration, or making a clean handoff back to certbot. The CloudPanzer panel's `permanent_delete_ssl.sh` calls this in lieu of `certbot delete` (which fails with "Certificate not found" when the cert is ubxcert-managed and not in certbot's store).
 
 ### `ubxcert list`
 
@@ -295,6 +370,39 @@ What happens per domain:
 2. A minimal `state.json` is created so ubxcert can track + renew the cert
 3. Symlinks in `/etc/letsencrypt/live/<domain>/` are updated to point at the ubxcert copies
 4. certbot's archive is **not touched** — originals are safe
+
+---
+
+## HTTP-01 Single-Domain Certificates
+
+For non-wildcard single-domain certs, HTTP-01 is faster than DNS-01: no DNS
+record to add, no propagation delay, and no Cloudflare integration needed.
+The trade-off is the server itself must serve the challenge file on port 80.
+
+```bash
+# 1. Request — ubxcert prints token + key authorization as JSON
+ubxcert request --domains "example.com" --email admin@example.com --challenge http
+
+# 2. Serve the key_authorization body at /.well-known/acme-challenge/<token>
+#    on example.com (port 80). For example, with nginx:
+#      location /.well-known/acme-challenge/ {
+#          default_type "text/plain";
+#          root /var/www/acme;
+#      }
+#    Then: echo "<key_authorization>" > /var/www/acme/.well-known/acme-challenge/<token>
+
+# 3. Complete — ubxcert polls the URL up to 60s, then downloads the cert
+ubxcert complete --domain example.com --challenge http --wait-http 60
+```
+
+Notes:
+- HTTP-01 cannot be used for `*.example.com` wildcard certs (per RFC 8555).
+  Wildcards always use DNS-01.
+- The challenge is served over **HTTP** (port 80), not HTTPS — the ACME server
+  follows the redirect from HTTPS to HTTP if needed.
+- The exact file path matters: it must be
+  `http://<domain>/.well-known/acme-challenge/<token>` and the file body must
+  be the `key_authorization` string **verbatim**, with no trailing whitespace.
 
 ---
 
