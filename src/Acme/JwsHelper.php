@@ -137,6 +137,17 @@ class JwsHelper
         return self::base64url(hash('sha256', $keyAuth, true));
     }
 
+    /**
+     * Compute the key authorization string for an HTTP-01 challenge token.
+     *  key_authorization = token + "." + thumbprint   (NOT hashed — served verbatim)
+     * Per RFC 8555 §8.3, the file at /.well-known/acme-challenge/<token>
+     * must contain this exact string.
+     */
+    public function computeKeyAuthorization(string $token): string
+    {
+        return $token . '.' . $this->getThumbprint();
+    }
+
     // -------------------------------------------------------------------------
     // JWS signing
     // -------------------------------------------------------------------------
