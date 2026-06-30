@@ -145,6 +145,12 @@ class SelfUpdateCommand extends BaseCommand
         return Application::getVersion();
     }
 
+    /** Public re-export for UpdateCommand (interactive prompt wrapper). */
+    public function getCurrentVersionPublic(): string
+    {
+        return $this->getCurrentVersion();
+    }
+
     private function fetchLatestVersion(): ?string
     {
         // Try GitHub releases API first
@@ -166,6 +172,12 @@ class SelfUpdateCommand extends BaseCommand
         }
 
         return null;
+    }
+
+    /** Public re-export for UpdateCommand (interactive prompt wrapper). */
+    public function fetchLatestVersionPublic(): ?string
+    {
+        return $this->fetchLatestVersion();
     }
 
     /**

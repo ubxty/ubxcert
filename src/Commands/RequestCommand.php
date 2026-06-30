@@ -6,6 +6,7 @@ namespace Ubxty\UbxCert\Commands;
 
 use Throwable;
 use Ubxty\UbxCert\Acme\AcmeClient;
+use Ubxty\UbxCert\Util\WebrootChallenger;
 
 /**
  * ubxcert request
@@ -167,7 +168,68 @@ class RequestCommand extends BaseCommand
         $this->log('info', "order created for {$baseDomain} domains=[" . implode(',', $domains) . "] challenge={$challenge} staging=" . ($this->staging ? 'yes' : 'no'));
         $this->verbose("Order state saved to: " . $this->state->getOrderDir($baseDomain) . '/state.json');
 
+        // --- Auto-webroot (HTTP-01 only, default ON) -----------------------
+        $autoWebroot    = $challenge === self::CHALLENGE_HTTP && !$this->hasFlag($args, 'no-auto-webroot');
+        $explicitRoot   = $this->extractOption($args, 'webroot');
+        $autoWebrootResults = [];
+        if ($autoWebroot) {
+            $autoWebrootResults = $this->runAutoWebroot($state, $explicitRoot);
+            $state['auto_webroot'] = $autoWebrootResults;
+        }
+
         return $this->outputChallenges($state);
+    }
+
+    /**
+     * For each HTTP-01 challenge, attempt to write the challenge file
+     * to the auto-detected docroot and verify reachability. Never
+     * throws — a failure here is a warning, not an error, because the
+     * operator may have explicitly chosen manual serve or may be
+     * running from a location where auto-detection is impossible.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function runAutoWebroot(array $state, ?string $explicitRoot): array
+    {
+        $results = [];
+        $seen    = [];
+        foreach ($state['challenges'] ?? [] as $c) {
+            $token = $c['token'] ?? null;
+            $domain = $c['domain'] ?? null;
+            if (!$token || !$domain) {
+                continue;
+            }
+            // One challenge per domain — skip duplicates by token.
+            if (isset($seen[$token])) {
+                continue;
+            }
+            $seen[$token] = true;
+
+            $result = WebrootChallenger::write(
+                $domain,
+                $token,
+                $c['key_authorization'] ?? '',
+                $explicitRoot,
+                true
+            );
+            $results[] = $result;
+
+            $this->out('');
+            if ($result['wrote'] && $result['verified']) {
+                $this->success("HTTP-01 auto-served: {$result['file_path']} (verified at {$result['url']})");
+            } elseif ($result['wrote']) {
+                $this->out("\033[33mHTTP-01 file written but not yet reachable from outside: {$result['file_path']}\033[0m");
+                if (!empty($result['error'])) {
+                    $this->out("\033[33m  " . $result['error'] . "\033[0m");
+                }
+            } else {
+                $this->out("\033[33mHTTP-01 auto-webroot skipped for {$domain}: " . ($result['error'] ?? 'unknown reason') . "\033[0m");
+                if ($explicitRoot === null) {
+                    $this->out("\033[2m  Pass --webroot=/path or --no-auto-webroot to take manual control.\033[0m");
+                }
+            }
+        }
+        return $results;
     }
 
     // -------------------------------------------------------------------------
@@ -323,7 +385,7 @@ class RequestCommand extends BaseCommand
             ? "ubxcert complete --domain {$state['domain']} --challenge http --wait-http 60" . ($state['staging'] ? ' --staging' : '')
             : "ubxcert complete --domain {$state['domain']}" . ($state['staging'] ? ' --staging' : '');
 
-        return [
+        $payload = [
             'domain'         => $state['domain'],
             'domains'        => $state['domains'],
             'staging'        => $state['staging'],
@@ -333,6 +395,12 @@ class RequestCommand extends BaseCommand
             'state_path'     => $this->state->getOrderDir($state['domain']) . '/state.json',
             'next_step'      => $next,
         ];
+
+        if ($isHttp && isset($state['auto_webroot']) && is_array($state['auto_webroot'])) {
+            $payload['auto_webroot'] = $state['auto_webroot'];
+        }
+
+        return $payload;
     }
 
     // -------------------------------------------------------------------------
