@@ -73,28 +73,88 @@ GitHub releases API for the latest tagged release and (if newer) replaces
 cron job and the state under `/etc/ubxcert/` are preserved.
 
 ```bash
-# Check first — does not change anything.
-sudo ubxcert self-update --check
+# Friendly alias — checks for updates and asks "Update now? [y/N]"
+# on a real TTY before installing. Defaults to N on non-TTY.
+sudo ubxcert update
+
+# Peek first, no install.
+sudo ubxcert update --check
 # → "New version available: v1.1.0" / "You are up-to-date."
 
-# Apply the update.
+# Skip the prompt (for automation / non-interactive shells).
+sudo ubxcert update --yes
+
+# Canonical command — same behavior, no prompt ever.
 sudo ubxcert self-update
+sudo ubxcert self-update --check
 
-# Or use the friendly short alias — it asks "Update now? [y/N]"
-# on a real TTY before installing (defaults to N if unsure).
-sudo ubxcert update
-sudo ubxcert update --yes    # skip the prompt
-
-# Confirm
+# Confirm after applying.
 ubxcert --version
 ```
 
 If the installed binary is older than v1.0.0 and does not yet include
-`self-update`, re-run the one-liner installer to bring it forward:
+`self-update`, re-run the one-liner installer to bring it forward — see
+[Upgrading from an older ubxcert](#upgrading-from-an-older-ubxcert) below.
+
+---
+
+### Upgrading from an older ubxcert
+
+Three paths, depending on what the box has today.
+
+#### Path 1 — installed via `install-ubxcert.sh` (most common)
+
+Any box where the original install ran the one-liner already has
+`/opt/ubxcert/.git`, which means `self-update` can fast-path to
+`git pull --ff-only` + `composer install --no-dev` without
+re-downloading anything. Just SSH in and run:
+
+```bash
+sudo ubxcert update            # y/N prompt on a TTY
+sudo ubxcert update --yes       # skip prompt
+sudo ubxcert update --check     # peek, no install
+```
+
+State under `/etc/ubxcert/` and the auto-renewal cron job are
+preserved across the upgrade. After the update, `ubxcert --version`
+should report `v1.1.0`.
+
+#### Path 2 — old binary that predates `self-update`
+
+Boxes installed before `self-update` shipped (any v0.x or very early
+v1.0.0) don't have the subcommand at all — `ubxcert self-update` will
+print `ubxcert: unknown command 'self-update'`. Re-run the installer
+from the main branch to bring the binary forward:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ubxty/ubxcert/main/install-ubxcert.sh | sudo bash
 ```
+
+The installer always pulls the latest main branch (not a tagged
+release), so this gives you v1.1.0 immediately. After it finishes,
+`sudo ubxcert update` works for future upgrades.
+
+#### Path 3 — dev box installed via the `git@infoubx` path-repo
+
+Developer / CI boxes where `ubxcert` was installed by cloning
+`git@infoubx:ubxty/ubxcert.git` rather than the public installer also
+have `/opt/ubxcert/.git`, but the remote points at the internal
+infoubx host. `self-update` from those boxes will try to pull from
+`git@infoubx` rather than GitHub — which is fine for development but
+will fail on production boxes that lack SSH access to `git@infoubx`.
+
+For production boxes that ended up in this state, point the remote
+at GitHub and rebase:
+
+```bash
+sudo git -C /opt/ubxcert remote set-url origin \
+  https://github.com/ubxty/ubxcert.git
+sudo git -C /opt/ubxcert fetch origin
+sudo git -C /opt/ubxcert reset --hard origin/main
+sudo composer install -d /opt/ubxcert --no-dev --optimize-autoloader
+```
+
+After that, `sudo ubxcert update` works normally.
 
 ---
 
