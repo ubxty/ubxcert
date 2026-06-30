@@ -18,6 +18,7 @@ use Ubxty\UbxCert\Commands\ScanCommand;
 use Ubxty\UbxCert\Commands\ScanServerCommand;
 use Ubxty\UbxCert\Commands\SelfUpdateCommand;
 use Ubxty\UbxCert\Commands\StatusCommand;
+use Ubxty\UbxCert\Commands\UpdateCommand;
 use Ubxty\UbxCert\Commands\VerifyDnsCommand;
 use Ubxty\UbxCert\Commands\WizardCommand;
 
@@ -28,7 +29,7 @@ use Ubxty\UbxCert\Commands\WizardCommand;
  */
 class Application
 {
-    private const VERSION = '1.0.0';
+    private const VERSION = '1.1.0';
 
     /** Expose version so SelfUpdateCommand can read it at runtime. */
     public static function getVersion(): string
@@ -55,6 +56,7 @@ class Application
         $this->register(new WizardCommand());
         $this->register(new MigrateCommand());
         $this->register(new SelfUpdateCommand());
+        $this->register(new UpdateCommand());
     }
 
     private function register(BaseCommand $cmd): void
@@ -183,6 +185,7 @@ class Application
   \033[1;36m┌──────────────────────────────────────────────────────┐\033[0m
   \033[1;36m│\033[0m  \033[1mubxcert\033[0m v{$v}  —  ACME v2 SSL certificate manager   \033[1;36m│\033[0m
   \033[1;36m│\033[0m  Drop-in replacement for certbot. No dependencies.   \033[1;36m│\033[0m
+  \033[1;36m│\033[0m  v1.1.0: auto HTTP-01 webroot (7 webservers).          \033[1;36m│\033[0m
   \033[1;36m└──────────────────────────────────────────────────────┘\033[0m
 
   \033[1mUsage:\033[0m  ubxcert <command> [options]
@@ -207,12 +210,19 @@ class Application
     \033[36mwizard\033[0m      Interactive TUI: detect webserver, pick site, issue + install cert
     \033[36mmigrate\033[0m     Migrate certbot-managed certs to ubxcert management
     \033[36mself-update\033[0m Update ubxcert to the latest version from GitHub
+    \033[36mupdate\033[0m      Short alias for `self-update` — checks for a newer release
+                  and asks "Update now? [y/N]" before installing
 
   \033[1mGlobal flags:\033[0m
-    \033[33m--staging\033[0m   Use Let's Encrypt staging (safe for testing)
-    \033[33m--json\033[0m      Machine-readable JSON output
-    \033[33m--verbose\033[0m   Show detailed ACME protocol steps
-    \033[33m--help\033[0m      Show per-command help (also: ubxcert help <cmd>)
+    \033[33m--staging\033[0m         Use Let's Encrypt staging (safe for testing)
+    \033[33m--json\033[0m            Machine-readable JSON output
+    \033[33m--verbose\033[0m         Show detailed ACME protocol steps
+    \033[33m--auto-webroot\033[0m    \033[2m(default for HTTP-01) auto-detect webserver + docroot, write
+                  /.well-known/acme-challenge/<token>, and verify reachability\033[0m
+    \033[33m--no-auto-webroot\033[0m \033[2mDisable auto-webroot; print challenges only\033[0m
+    \033[33m--webroot\033[0m         \033[2mOverride the auto-detected docroot (used with --no-auto-webroot
+                  or to point at a non-default path)\033[0m
+    \033[33m--help\033[0m            Show per-command help (also: ubxcert help <cmd>)
 
   \033[1mTypical workflow:\033[0m
 
@@ -221,8 +231,8 @@ class Application
 
     \033[2m# 1b. OR request a single-domain cert via HTTP-01 (no DNS work needed)\033[0m
     ubxcert request --domains "example.com" --email admin@example.com --challenge http
-    \033[2m#    → returns the token + key authorization as JSON; serve at\033[0m
-    \033[2m#      http://example.com/.well-known/acme-challenge/<token>\033[0m
+    \033[2m#    → ubxcert auto-serves the challenge at the detected docroot;\033[0m
+    \033[2m#      pass --no-auto-webroot to print challenges and serve manually.\033[0m
 
     \033[2m# 2. Add the TXT records / serve the HTTP file, then complete the order\033[0m
     ubxcert complete --domain example.com --wait-dns 600
@@ -273,21 +283,29 @@ HELP;
   ubxcert request --domains "example.com" --email admin@example.com --challenge http
 
 \033[1mOptions:\033[0m
-  --domains    \033[2mComma-separated list of domains (wildcard supported with --challenge dns only)\033[0m
-  --email      \033[2mACME account email (used for Let's Encrypt notices)\033[0m
-  --challenge  \033[2mChallenge type: dns (default) or http. HTTP-01 is faster (no DNS propagation)
-                but does not support wildcard domains. Single-domain certs only.\033[0m
-  --force      \033[2mDiscard any existing pending order and create a fresh one\033[0m
-  --staging    \033[2mUse Let's Encrypt staging (no rate limits, fake cert)\033[0m
-  --json       \033[2mOutput challenge data as JSON\033[0m
+  --domains           \033[2mComma-separated list of domains (wildcard supported with --challenge dns only)\033[0m
+  --email             \033[2mACME account email (used for Let's Encrypt notices)\033[0m
+  --challenge         \033[2mChallenge type: dns (default) or http. HTTP-01 is faster (no DNS propagation)
+                       but does not support wildcard domains. Single-domain certs only.\033[0m
+  --auto-webroot      \033[2m(default for HTTP-01) detect the active webserver + docroot for the first
+                       domain, write /.well-known/acme-challenge/<token>, and verify the file is
+                       reachable from the public internet\033[0m
+  --no-auto-webroot   \033[2mPrint HTTP-01 challenges only; do not write to the docroot. Useful behind
+                       a CDN or when an external process owns the well-known path\033[0m
+  --webroot=DIR       \033[2mOverride the detected docroot for --auto-webroot (or supply one when
+                       --no-auto-webroot is set)\033[0m
+  --force             \033[2mDiscard any existing pending order and create a fresh one\033[0m
+  --staging           \033[2mUse Let's Encrypt staging (no rate limits, fake cert)\033[0m
+  --json              \033[2mOutput challenge data as JSON\033[0m
 
 \033[1mWhat it does:\033[0m
   1. Registers (or re-uses) a Let's Encrypt account for --email
   2. Creates a new ACME order for all supplied domains
   3. Computes the challenge values (DNS-01 TXT records OR HTTP-01 file body)
   4. Prints them — for DNS-01, add the TXT records to your DNS;
-     for HTTP-01, serve the file at /.well-known/acme-challenge/<token>
-     on the domain itself (port 80)
+     for HTTP-01, by default ubxcert auto-detects nginx/openresty/apache/
+     caddy/litespeed/lighttpd/nginx-unit, writes the file to its docroot,
+     and probes the public URL to confirm reachability.
 
 \033[1mNext step:\033[0m
   ubxcert complete --domain example.com --wait-dns 600
@@ -329,13 +347,17 @@ T,
   ubxcert complete --domain example.com --challenge http --wait-http 60
 
 \033[1mOptions:\033[0m
-  --domain     \033[2mBase domain (must match domain used in 'request')\033[0m
-  --challenge  \033[2mOverride challenge type detection (dns or http). Usually inferred
-                from the saved order state. Must match what was used in 'request'.\033[0m
-  --wait-dns   \033[2mSeconds to poll DNS for TXT propagation (default: 0 = no wait, DNS-01 only)\033[0m
-  --wait-http  \033[2mSeconds to poll the HTTP-01 endpoint for the challenge file (default: 0)\033[0m
-  --staging    \033[2mMust match the flag used in 'request'\033[0m
-  --json       \033[2mOutput certificate details as JSON\033[0m
+  --domain           \033[2mBase domain (must match domain used in 'request')\033[0m
+  --challenge        \033[2mOverride challenge type detection (dns or http). Usually inferred
+                      from the saved order state. Must match what was used in 'request'.\033[0m
+  --auto-webroot     \033[2m(default for HTTP-01) write the challenge file to the detected
+                      docroot before polling; idempotent if the file already exists\033[0m
+  --no-auto-webroot  \033[2mAssume the challenge file is already being served externally\033[0m
+  --webroot=DIR      \033[2mOverride the detected docroot (e.g. behind a CDN staging area)\033[0m
+  --wait-dns         \033[2mSeconds to poll DNS for TXT propagation (default: 0 = no wait, DNS-01 only)\033[0m
+  --wait-http        \033[2mSeconds to poll the HTTP-01 endpoint for the challenge file (default: 0)\033[0m
+  --staging          \033[2mMust match the flag used in 'request'\033[0m
+  --json             \033[2mOutput certificate details as JSON\033[0m
 
 \033[1mWhat it does:\033[0m
   1. Loads the order state saved by 'request'
@@ -611,6 +633,40 @@ T,
   Root is required — run: sudo ubxcert self-update
   The existing cron job and state directories are preserved.
   Use 'ubxcert --version --check' to only check without installing.
+  v1.1.0 added automatic HTTP-01 webroot management for seven webservers
+  (nginx, openresty, apache, caddy, litespeed, lighttpd, nginx-unit).
+T,
+
+            'update' => <<<T
+\033[1mubxcert update\033[0m — Shortcut for `self-update` with an interactive y/N prompt
+
+\033[1mUsage:\033[0m
+  ubxcert update
+  ubxcert update --yes
+  ubxcert update --check
+  ubxcert update --force
+  ubxcert update --json
+
+\033[1mOptions:\033[0m
+  --yes / -y  \033[2mSkip the confirmation prompt (e.g. for automation)\033[0m
+  --check     \033[2mPrint version info, do not install\033[0m
+  --force     \033[2mRe-install even if already on the latest version\033[0m
+  --json      \033[2mOutput as JSON (suppresses the prompt)\033[0m
+  --verbose   \033[2mStream the full install script output\033[0m
+
+\033[1mWhat it does:\033[0m
+  1. Queries GitHub for the latest tagged release
+  2. Compares it against the running version
+  3. If newer, prints a summary and asks "Update now? [y/N]"
+  4. If you answer y (or pass --yes), runs the same install path as
+     `self-update` — replaces /opt/ubxcert and /usr/local/bin/ubxcert
+
+\033[1mNotes:\033[0m
+  Root is required — run: sudo ubxcert update
+  The prompt is skipped automatically in non-interactive contexts
+  (cron, piped output, no TTY) — pass --yes to force-apply.
+  This is a thin wrapper over `ubxcert self-update` and shares all
+  of its flags and exit codes.
 T,
         ];
     }
