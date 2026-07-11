@@ -15,9 +15,26 @@ use Ubxty\UbxCert\Util\WebrootChallenger;
  * (DNS-01 or HTTP-01), and persists full order state to disk so
  * `ubxcert complete` can resume it.
  *
+ * Defaults (v1.2.0+):
+ *   - --challenge defaults to 'http' when the domain list contains no
+ *     wildcard, otherwise 'dns'. Override with --challenge dns|http.
+ *   - For HTTP-01 single domains, the auto-chain runs by default:
+ *     request → complete → install in one shot. Pass --no-auto to
+ *     preview challenge values and finish manually.
+ *   - DNS-01 / wildcards always print the TXT records and stop the
+ *     chain at request (no DNS provider integration in scope).
+ *
  * Usage:
+ *   # Default — one-shot issue + install for a single domain
+ *   ubxcert request --domains "example.com" --email admin@example.com
+ *
+ *   # Wildcard — DNS-01 (HTTP-01 cannot serve *.); prints TXT records
  *   ubxcert request --domains "*.example.com,example.com" --email admin@example.com
- *   ubxcert request --domains "example.com" --email admin@example.com --challenge http
+ *
+ *   # Manual / preview — disable the auto-chain
+ *   ubxcert request --domains "example.com" --email admin@example.com --no-auto
+ *
+ *   # Other flags:
  *   ubxcert request --domains "*.example.com,example.com" --email admin@example.com --json
  *   ubxcert request --domains "*.example.com,example.com" --email admin@example.com --staging --force
  */
@@ -26,6 +43,12 @@ class RequestCommand extends BaseCommand
     private const CHALLENGE_DNS  = 'dns';
     private const CHALLENGE_HTTP = 'http';
 
+    /** Default --wait-http seconds when --auto is set on HTTP-01. */
+    private const AUTO_DEFAULT_WAIT_HTTP = 120;
+
+    /** Default --wait-dns seconds when --auto is set on DNS-01 (used as a hint). */
+    private const AUTO_DEFAULT_WAIT_DNS  = 600;
+
     public function getName(): string        { return 'request'; }
     public function getDescription(): string { return 'Create ACME order and output challenge info (DNS-01 or HTTP-01)'; }
 
@@ -33,33 +56,52 @@ class RequestCommand extends BaseCommand
     {
         $this->parseCommonArgs($args);
 
-        $domainsRaw = $this->extractOption($args, 'domains');
-        $email      = $this->extractOption($args, 'email');
-        $force      = $this->hasFlag($args, 'force');
-        $challenge  = strtolower($this->extractOption($args, 'challenge') ?? self::CHALLENGE_DNS);
+        $domainsRaw        = $this->extractOption($args, 'domains');
+        $email             = $this->extractOption($args, 'email');
+        $force             = $this->hasFlag($args, 'force');
+        $noAuto            = $this->hasFlag($args, 'no-auto');
+        $auto              = !$noAuto; // ON by default for HTTP-01 (v1.2.0+); --no-auto opts out
+        $waitHttpOpt       = $this->extractOption($args, 'wait-http');
+        $waitDnsOpt        = $this->extractOption($args, 'wait-dns');
+        $installWebserver  = $this->extractOption($args, 'install-webserver');
+        $challengeOverride = $this->extractOption($args, 'challenge');
 
         if (!$domainsRaw || !$email) {
-            $this->fail('Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--staging] [--force] [--json]');
+            $this->fail('Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--no-auto] [--staging] [--force] [--json]');
             return 1;
         }
+
+        // Build the domain list first so we can auto-detect a sensible
+        // --challenge default before validating wildcard-vs-HTTP-01.
+        $domains    = array_map('trim', explode(',', $domainsRaw));
+        $domains    = array_values(array_filter($domains, fn($d) => $d !== ''));
+        $baseDomain = $this->extractBaseDomain($domains);
+
+        // Resolve challenge: explicit override > auto-detect > dns (legacy default).
+        $challenge = $challengeOverride !== null
+            ? strtolower($challengeOverride)
+            : $this->detectChallenge($domains);
 
         if (!in_array($challenge, [self::CHALLENGE_DNS, self::CHALLENGE_HTTP], true)) {
             $this->fail("Invalid --challenge value '{$challenge}'. Use 'dns' or 'http'.");
             return 1;
         }
 
-        $domains    = array_map('trim', explode(',', $domainsRaw));
-        $domains    = array_values(array_filter($domains, fn($d) => $d !== ''));
-        $baseDomain = $this->extractBaseDomain($domains);
-
         // HTTP-01 cannot satisfy wildcard identifiers — RFC 8555 §7.2.
         if ($challenge === self::CHALLENGE_HTTP) {
             foreach ($domains as $d) {
                 if (str_starts_with($d, '*.')) {
-                    $this->fail("HTTP-01 does not support wildcards. Found: {$d}. Use --challenge dns (default) for wildcard certs.");
+                    $this->fail("HTTP-01 does not support wildcards. Found: {$d}. Use --challenge dns (default for wildcards) or omit --challenge.");
                     return 1;
                 }
             }
+        }
+
+        // Surface useless arg combinations early (still harmless if --auto is off,
+        // but the user is asking for semantics that don't apply to the chosen path).
+        if ($challenge === self::CHALLENGE_DNS && $waitHttpOpt !== null) {
+            $this->fail("--wait-http is not compatible with --challenge dns. Use --wait-dns for wildcard/DNS-01.");
+            return 1;
         }
 
         $challengeLabel = $challenge === self::CHALLENGE_HTTP ? 'HTTP-01' : 'DNS-01';
@@ -177,6 +219,22 @@ class RequestCommand extends BaseCommand
             $state['auto_webroot'] = $autoWebrootResults;
         }
 
+        // --- Optional auto-chain: request → complete → install -----------
+        if ($auto) {
+            return $this->runAutoChain(
+                $baseDomain,
+                $domains,
+                $challenge,
+                $waitHttpOpt,
+                $waitDnsOpt,
+                $installWebserver,
+                $this->staging,
+                $this->jsonMode,
+                $this->verbose,
+                $state
+            );
+        }
+
         return $this->outputChallenges($state);
     }
 
@@ -230,6 +288,213 @@ class RequestCommand extends BaseCommand
             }
         }
         return $results;
+    }
+
+    // -------------------------------------------------------------------------
+    // Default-challenge detection + auto-chain
+    // -------------------------------------------------------------------------
+
+    /**
+     * Pick a default --challenge value based on the domain list.
+     *
+     * - Any wildcard identifier (`*.foo`) forces DNS-01 (HTTP-01 cannot
+     *   satisfy wildcards per RFC 8555 §7.2).
+     * - Otherwise default to HTTP-01 — it's dramatically faster (no DNS
+     *   propagation wait) and ubxcert auto-serves the challenge file.
+     */
+    private function detectChallenge(array $domains): string
+    {
+        foreach ($domains as $d) {
+            if (is_string($d) && str_starts_with($d, '*.')) {
+                return self::CHALLENGE_DNS;
+            }
+        }
+        return self::CHALLENGE_HTTP;
+    }
+
+    /**
+     * Drive `complete → install` after a successful `request` when --auto
+     * was passed. Returns the final exit code of the chain.
+     *
+     * Behaviour:
+     *  - HTTP-01 single-domain case: chains `complete --wait-http N` then
+     *    `install` into the detected web server (or --install-webserver
+     *    override), printing banner lines along the way.
+     *  - DNS-01 / wildcard case: prints a single yellow note explaining the
+     *    manual TXT-record requirement, then exits 0. No DNS provider
+     *    integration is in scope for v1.2.0.
+     *  - On any failure: cert files at /etc/ubxcert/certs/<domain>/ are
+     *    still on disk; the failure is reported with the suggested re-run
+     *    command and the appropriate exit code is propagated.
+     *
+     * @return int The chain's final exit code (0 = full success).
+     */
+    private function runAutoChain(
+        string $baseDomain,
+        array  $domains,
+        string $challenge,
+        ?string $waitHttpOpt,
+        ?string $waitDnsOpt,
+        ?string $installWebserver,
+        bool   $staging,
+        bool   $jsonMode,
+        bool   $verbose,
+        array  $state
+    ): int {
+        $isHttp = $challenge === self::CHALLENGE_HTTP;
+
+        // Resolve effective wait times. Honour the explicit flag, then
+        // the env var, then the default constant.
+        $envWaitHttp = getenv('UBXCERT_AUTO_WAIT_HTTP');
+        $envWaitDns  = getenv('UBXCERT_AUTO_WAIT_DNS');
+        $waitHttp    = $waitHttpOpt !== null
+            ? (int) $waitHttpOpt
+            : ($envWaitHttp !== false && $envWaitHttp !== '' ? (int) $envWaitHttp : self::AUTO_DEFAULT_WAIT_HTTP);
+        $waitDns     = $waitDnsOpt !== null
+            ? (int) $waitDnsOpt
+            : ($envWaitDns !== false && $envWaitDns !== '' ? (int) $envWaitDns : self::AUTO_DEFAULT_WAIT_DNS);
+
+        $chainResult = [
+            'request'       => ['domain' => $baseDomain, 'challenge_type' => $challenge, 'domains' => $domains, 'auto' => true],
+            'complete'      => null,
+            'install'       => null,
+        ];
+
+        // --- DNS-01 / wildcard case: chain stops here -----------------------
+        // The cert order is created, but issue/download/install must wait
+        // for the operator to add the DNS TXT records. No DNS provider
+        // integration in v1.2.0 — this is a deliberate scope limit.
+        if (!$isHttp) {
+            $this->warn('Wildcard / DNS-01 requires manual TXT records. Auto-chain stops at request.');
+            $stagingFlag = $staging ? ' --staging' : '';
+            $this->out('');
+            $this->out('After adding the TXT records printed above, run:');
+            $this->out("  ubxcert complete --domain {$baseDomain} --wait-dns {$waitDns}{$stagingFlag}");
+            $this->out('Or to opt out of the auto-chain entirely (preview challenges only): add --no-auto.');
+            $this->out('');
+
+            if ($jsonMode) {
+                $payload = $this->buildChallengeOutput($state) + $chainResult;
+                $payload['auto_chain'] = $chainResult;
+                $payload['domain']     = $baseDomain;
+                $payload['next_step']  = "ubxcert complete --domain {$baseDomain} --wait-dns {$waitDns}" . ($state['staging'] ? ' --staging' : '');
+                $this->outputJson($payload);
+            }
+            return 0;
+        }
+
+        // --- Step 2: complete (HTTP-01) -------------------------------------
+        if (!$jsonMode) {
+            $this->out('');
+            $this->out('--- Auto-chain: complete ---');
+        }
+
+        $complete = new CompleteCommand();
+        $completeArgs = ['--domain', $baseDomain, '--challenge', 'http', '--wait-http', (string) $waitHttp];
+        if ($staging)  { $completeArgs[] = '--staging'; }
+        if ($jsonMode) { $completeArgs[] = '--json'; }
+        if ($verbose)  { $completeArgs[] = '--verbose'; }
+
+        $code = $complete->run($completeArgs);
+        $chainResult['complete'] = ['exit' => $code, 'wait_http' => $waitHttp];
+
+        if ($code !== 0) {
+            $chainResult['install'] = ['skipped' => true, 'reason' => 'complete-failed'];
+            if (!$jsonMode) {
+                $this->fail("Auto-chain stopped at 'complete' (exit {$code}). Cert files may be partially saved at /etc/ubxcert/certs/{$baseDomain}/. Re-run:");
+                $this->out("  ubxcert complete --domain {$baseDomain} --challenge http --wait-http {$waitHttp}" . ($staging ? ' --staging' : ''));
+                $this->out("  ubxcert install  --domain {$baseDomain} --webserver openresty|nginx|apache");
+            }
+            if ($jsonMode) {
+                $payload = $this->buildChallengeOutput($state) + $chainResult;
+                $payload['auto_chain'] = $chainResult;
+                $payload['domain']     = $baseDomain;
+                $this->outputJson($payload);
+            }
+            return $code;
+        }
+
+        // --- Step 3: install (auto-pick webserver) --------------------------
+        // Priority: --install-webserver > vhost-deduced webserver > running primary.
+        $ws = $installWebserver;
+        $docrootInfo = \Ubxty\UbxCert\Util\VhostScanner::resolveDocroot($baseDomain);
+        if ($ws === null && $docrootInfo !== null && isset($docrootInfo['webserver'])) {
+            $ws = $docrootInfo['webserver'];
+        }
+        if ($ws === null) {
+            $ws = \Ubxty\UbxCert\Util\VhostScanner::detectPrimary();
+        }
+
+        if ($ws === null) {
+            $chainResult['install'] = ['skipped' => true, 'reason' => 'no-webserver-detected'];
+            if (!$jsonMode) {
+                $this->warn("Cert issued and saved for {$baseDomain}, but no active web server was detected.");
+                $this->out('Install manually with:');
+                $this->out("  ubxcert install --domain {$baseDomain} --webserver openresty|nginx|apache");
+            }
+            if ($jsonMode) {
+                $payload = $this->buildChallengeOutput($state) + $chainResult;
+                $payload['auto_chain'] = $chainResult;
+                $payload['domain']     = $baseDomain;
+                $this->outputJson($payload);
+            }
+            return 0;
+        }
+
+        if (!$jsonMode) {
+            $this->out('');
+            $this->out('--- Auto-chain: install ---');
+            $this->out("  webserver : {$ws}");
+        }
+
+        $installer    = new InstallWebserverCommand();
+        $installArgs  = ['--domain', $baseDomain, '--webserver', $ws];
+        if ($jsonMode) { $installArgs[] = '--json'; }
+        if ($verbose)  { $installArgs[] = '--verbose'; }
+
+        $code = $installer->run($installArgs);
+        $chainResult['install'] = [
+            'exit'         => $code,
+            'webserver'    => $ws,
+            'docroot_info' => $docrootInfo !== null
+                ? [
+                    'docroot'     => $docrootInfo['docroot']     ?? null,
+                    'webserver'   => $docrootInfo['webserver']   ?? null,
+                    'config_path' => $docrootInfo['config_path'] ?? null,
+                ]
+                : null,
+        ];
+
+        if ($code !== 0) {
+            if (!$jsonMode) {
+                $this->warn("Cert issued. Install failed (exit {$code}). Re-run manually once the vhost config is in place:");
+                $this->out("  ubxcert install --domain {$baseDomain} --webserver {$ws} --conf /path/to/{$baseDomain}.conf");
+            }
+            if ($jsonMode) {
+                $payload = $this->buildChallengeOutput($state) + $chainResult;
+                $payload['auto_chain'] = $chainResult;
+                $payload['domain']     = $baseDomain;
+                $this->outputJson($payload);
+            }
+            return $code;
+        }
+
+        if (!$jsonMode) {
+            $this->success("Auto-chain complete: cert installed on {$ws} for {$baseDomain}.");
+            $this->out('  Cert dir   : ' . $this->state->getCertDir($baseDomain));
+            $this->out('  LE symlink : /etc/letsencrypt/live/' . $baseDomain);
+        }
+
+        if ($jsonMode) {
+            $payload = $this->buildChallengeOutput($state) + $chainResult;
+            $payload['auto_chain'] = $chainResult;
+            $payload['domain']     = $baseDomain;
+            // In --auto --json mode, the chain IS the next step; suppress
+            // the original "complete ..." command string.
+            unset($payload['next_step']);
+            $this->outputJson($payload);
+        }
+        return 0;
     }
 
     // -------------------------------------------------------------------------

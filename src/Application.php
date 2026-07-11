@@ -29,7 +29,7 @@ use Ubxty\UbxCert\Commands\WizardCommand;
  */
 class Application
 {
-    private const VERSION = '1.1.0';
+    private const VERSION = '1.2.0';
 
     /** Expose version so SelfUpdateCommand can read it at runtime. */
     public static function getVersion(): string
@@ -185,7 +185,10 @@ class Application
   \033[1;36m┌──────────────────────────────────────────────────────┐\033[0m
   \033[1;36m│\033[0m  \033[1mubxcert\033[0m v{$v}  —  ACME v2 SSL certificate manager   \033[1;36m│\033[0m
   \033[1;36m│\033[0m  Drop-in replacement for certbot. No dependencies.   \033[1;36m│\033[0m
-  \033[1;36m│\033[0m  v1.1.0: auto HTTP-01 webroot (7 webservers).          \033[1;36m│\033[0m
+  \033[1;36m│\033[0m  v1.2.0: HTTP-01 single domains are now fully automatic \033[1;36m│\033[0m
+  \033[1;36m│\033[0m  (request → complete → install). Default --challenge   \033[1;36m│\033[0m
+  \033[1;36m│\033[0m  = http for non-wildcard, = dns otherwise. Pass --no- \033[1;36m│\033[0m
+  \033[1;36m│\033[0m  auto to preview or work manually.                     \033[1;36m│\033[0m
   \033[1;36m└──────────────────────────────────────────────────────┘\033[0m
 
   \033[1mUsage:\033[0m  ubxcert <command> [options]
@@ -226,25 +229,26 @@ class Application
 
   \033[1mTypical workflow:\033[0m
 
-    \033[2m# 1. Request a wildcard cert — prints DNS TXT records to add\033[0m
+    \033[2m# 1. Easiest path — single-domain default, fully automatic\033[0m
+    ubxcert request --domains "example.com" --email admin@example.com
+    \033[2m#    → HTTP-01 by default for non-wildcard lists. Issues AND installs\033[0m
+    \033[2m#      onto the active web server (request → complete → install).\033[0m
+
+    \033[2m# 1a. Manual / preview (HTTP-01 step-by-step):\033[0m
+    ubxcert request  --domains "example.com" --email admin@example.com --no-auto
+    ubxcert complete --domain example.com --wait-http 60
+    ubxcert install  --domain example.com --webserver openresty|nginx|apache
+
+    \033[2m# 1b. Wildcard cert — DNS-01 only (HTTP-01 cannot serve *.)\033[0m
     ubxcert request --domains "*.example.com,example.com" --email admin@example.com
-
-    \033[2m# 1b. OR request a single-domain cert via HTTP-01 (no DNS work needed)\033[0m
-    ubxcert request --domains "example.com" --email admin@example.com --challenge http
-    \033[2m#    → ubxcert auto-serves the challenge at the detected docroot;\033[0m
-    \033[2m#      pass --no-auto-webroot to print challenges and serve manually.\033[0m
-
-    \033[2m# 2. Add the TXT records / serve the HTTP file, then complete the order\033[0m
+    \033[2m#    → prints DNS TXT records; auto-chain stops here by design\033[0m
+    \033[2m#      (no DNS provider integration in v1.2.0).\033[0m
     ubxcert complete --domain example.com --wait-dns 600
-    ubxcert complete --domain example.com --challenge http --wait-http 60
 
-    \033[2m# 3. Install into your web server\033[0m
-    ubxcert install  --domain example.com --webserver openresty
-
-    \033[2m# 4. Check all certificates\033[0m
+    \033[2m# 2. Check all certificates\033[0m
     ubxcert list
 
-    \033[2m# 5. Renew automatically (also wired to cron)\033[0m
+    \033[2m# 3. Renew automatically (also wired to cron)\033[0m
     ubxcert renew --all
 
   \033[2mDocs / source:  https://github.com/ubxty/ubxcert\033[0m
@@ -274,19 +278,33 @@ HELP;
     {
         return [
             'request' => <<<T
-\033[1mubxcert request\033[0m — Create an ACME order and print challenge values
+\033[1mubxcert request\033[0m — Create an ACME order, chain complete + install by default
 
 \033[1mUsage:\033[0m
-  ubxcert request --domains "*.example.com,example.com" --email admin@example.com
+  ubxcert request --domains "example.com" --email admin@example.com
+  \033[2m# Default — issues AND installs onto the active web server.\033[0m
   ubxcert request --domains "site.com" --email admin@site.com --staging
   ubxcert request --domains "*.example.com,example.com" --email admin@example.com --force
+  ubxcert request --domains "example.com" --email admin@example.com --no-auto
   ubxcert request --domains "example.com" --email admin@example.com --challenge http
 
 \033[1mOptions:\033[0m
   --domains           \033[2mComma-separated list of domains (wildcard supported with --challenge dns only)\033[0m
   --email             \033[2mACME account email (used for Let's Encrypt notices)\033[0m
-  --challenge         \033[2mChallenge type: dns (default) or http. HTTP-01 is faster (no DNS propagation)
-                       but does not support wildcard domains. Single-domain certs only.\033[0m
+  --challenge         \033[2mDefault = 'http' when no domain is a wildcard, 'dns' otherwise. Override with
+                       'dns' or 'http'. HTTP-01 is dramatically faster (no DNS propagation wait) and
+                       single-domain only — wildcards always require DNS-01.\033[0m
+  --no-auto           \033[2mDisable the default request → complete → install auto-chain. For HTTP-01
+                       single domains this prints the challenge body and lets you run 'complete' +
+                       'install' by hand. For DNS-01 / wildcards the auto-chain does not run anyway
+                       (no DNS provider integration in scope) so this flag has no effect there.\033[0m
+  --install-webserver \033[2mForce the install step to use openresty|nginx|apache. Default: the webserver
+                       that owns this domain's vhost docroot, falling back to the first running
+                       webserver detected by systemctl.\033[0m
+  --wait-http N       \033[2mSeconds to wait on the HTTP-01 endpoint inside the auto-chain 'complete'.
+                       Default: 120. Honour UBXCERT_AUTO_WAIT_HTTP env var.\033[0m
+  --wait-dns N        \033[2mSeconds suggested for the manual 'complete' run after DNS-01 records are
+                       added. Default: 600. Honour UBXCERT_AUTO_WAIT_DNS env var.\033[0m
   --auto-webroot      \033[2m(default for HTTP-01) detect the active webserver + docroot for the first
                        domain, write /.well-known/acme-challenge/<token>, and verify the file is
                        reachable from the public internet\033[0m
@@ -296,20 +314,46 @@ HELP;
                        --no-auto-webroot is set)\033[0m
   --force             \033[2mDiscard any existing pending order and create a fresh one\033[0m
   --staging           \033[2mUse Let's Encrypt staging (no rate limits, fake cert)\033[0m
-  --json              \033[2mOutput challenge data as JSON\033[0m
+  --json              \033[2mOutput challenge data as JSON. With the auto-chain on, the JSON envelope
+                       contains an 'auto_chain' block summarising the complete + install steps.\033[0m
 
 \033[1mWhat it does:\033[0m
   1. Registers (or re-uses) a Let's Encrypt account for --email
   2. Creates a new ACME order for all supplied domains
   3. Computes the challenge values (DNS-01 TXT records OR HTTP-01 file body)
-  4. Prints them — for DNS-01, add the TXT records to your DNS;
-     for HTTP-01, by default ubxcert auto-detects nginx/openresty/apache/
-     caddy/litespeed/lighttpd/nginx-unit, writes the file to its docroot,
-     and probes the public URL to confirm reachability.
+  4. For HTTP-01, by default ubxcert auto-detects nginx/openresty/apache/
+     caddy/litespeed/lighttpd/nginx-unit, writes the challenge file to its
+     docroot, and probes the public URL to confirm reachability.
+  5. By default, also runs 'complete' (waiting for the HTTP endpoint) and
+     'install' (injecting the cert into the vhost + reloading). Pass --no-auto
+     to stop after step 4 and finish the chain yourself.
 
-\033[1mNext step:\033[0m
-  ubxcert complete --domain example.com --wait-dns 600
-  ubxcert complete --domain example.com --challenge http --wait-http 60
+\033[1mAuto-chain (default ON for HTTP-01):\033[0m
+  When the chosen challenge is HTTP-01, ubxcert chains 'complete' (with
+  --wait-http 120 by default) and 'install' (with the active webserver
+  auto-detected) after creating the order. DNS-01 / wildcards print a note
+  explaining that automatic DNS-01 needs a provider integration which is
+  out of scope in v1.2.0 — the order IS created, but you must run
+  'complete' manually after adding the TXT records.
+
+  Flags forwarded into the chain's child commands:
+    --staging           Passed to 'complete'
+    --json              Passed to 'complete' and 'install'; combined JSON envelope on stdout
+    --verbose           Passed to 'complete' and 'install'
+    --webroot=DIR       Forwarded to HTTP-01 auto-webroot in request + complete
+    --no-auto-webroot   Disable auto-webroot in request + complete
+    --install-webserver Override the install-step webserver
+    --wait-http N       Override HTTP-01 polling timeout (default 120, env UBXCERT_AUTO_WAIT_HTTP)
+
+  Edge handling:
+    - No webserver detected → cert still saved, manual install hint printed, exit 0
+    - Install fails (vhost conf missing) → cert still saved, re-run hint printed
+    - Existing pending order with mismatched challenge → error, --force required
+    - --no-auto opts out → challenge values printed for manual 'complete' + 'install'
+
+\033[1mNext step (when --no-auto is set):\033[0m
+  ubxcert complete --domain example.com --wait-http 60
+  ubxcert install  --domain example.com --webserver openresty|nginx|apache
 T,
 
             'verify-dns' => <<<T
@@ -458,7 +502,6 @@ T,
   --purge         \033[2mAlso remove /etc/letsencrypt/live/<domain>/ symlink dir and renewal/<domain>.conf\033[0m
   --keep-cert     \033[2mPreserve cert files; only clear order state\033[0m
   --keep-state    \033[2mPreserve order state; only remove cert files\033[0m
-  --certbot       \033[2mAlso invoke `certbot delete --cert-name <domain>` (for legacy certbot-managed certs)\033[0m
   --json          \033[2mMachine-readable JSON output\033[0m
 
 \033[1mBehavior:\033[0m
@@ -635,6 +678,7 @@ T,
   Use 'ubxcert --version --check' to only check without installing.
   v1.1.0 added automatic HTTP-01 webroot management for seven webservers
   (nginx, openresty, apache, caddy, litespeed, lighttpd, nginx-unit).
+  v1.2.0 deprecates the --certbot flag on `delete`.
 T,
 
             'update' => <<<T

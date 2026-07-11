@@ -10,22 +10,47 @@
 
 ---
 
+## What's new in v1.2.0
+
+- **HTTP-01 single domains are now fully automatic.** `ubxcert request` defaults to
+  `request → complete → install` in one shot — issue a cert and install it on the
+  active web server with a single command. Pass `--no-auto` to preview the
+  challenge values and finish by hand.
+- **Smart `--challenge` default.** HTTP-01 is selected for non-wildcard domain lists;
+  DNS-01 is forced only when a wildcard (`*.`) is present.
+- **Webserver auto-detected** for the install step — the webserver that owns the
+  domain's vhost docroot wins, falling back to the first running service detected
+  by `systemctl`. Override with `--install-webserver`.
+- v1.1.0 HTTP-01 auto-webroot remains: nginx, openresty, apache, caddy, litespeed,
+  lighttpd, and nginx-unit are all auto-detected and the challenge file is
+  written/probed for you.
+
+```bash
+sudo ubxcert request --domains "example.com" --email admin@example.com
+# Done. Cert issued, installed, webserver reloaded.
+```
+
+---
+
 ## Why ubxcert?
 
 | Feature | ubxcert | certbot |
 |---|---|---|
 | Language | Pure PHP 8.1+ | Python 3 + deps |
-| Two-step resumable flow | ✅ | ❌ |
-| Wildcard certs (DNS-01) | ✅ | ✅ |
-| Single-domain certs (HTTP-01) | ✅ (no DNS work needed)¹ | ✅ |
-| ACME v2 RFC 8555 | ✅ | ✅ |
 | Zero non-PHP dependencies | ✅ | ❌ |
+| ACME v2 / RFC 8555 | ✅ | ✅ |
+| Wildcard certs (DNS-01) | ✅ | ✅ |
+| Single-domain certs (HTTP-01) | ✅ — no DNS work needed | ✅ |
+| Default auto-chain (HTTP-01, v1.2.0+) | ✅ — `request → complete → install` in one command | ❌ |
+| HTTP-01 auto-webroot (v1.1.0+) | ✅ — seven webservers supported¹ | partial |
+| Two-step resumable flow | ✅ | ❌ |
 | Certbot drop-in symlinks | ✅ — `/etc/letsencrypt/live/` | native |
 | Interactive wizard | ✅ | ❌ |
 | Health check (`doctor`) | ✅ | ❌ |
 | Migrate certbot certs | ✅ | n/a |
-| Idempotent delete (`delete`) | ✅ | ❌ (errors if missing) |
+| Idempotent delete | ✅ | ❌ (errors if missing) |
 | JSON output on every command | ✅ | partial |
+| Built-in self-updater | ✅ — `ubxcert update` | external |
 
 ¹ v1.1.0+ auto-serves the `/.well-known/acme-challenge/<token>` file across nginx, openresty, apache, caddy, litespeed, lighttpd, and nginx-unit — no manual `echo` needed.
 
@@ -79,7 +104,7 @@ sudo ubxcert update
 
 # Peek first, no install.
 sudo ubxcert update --check
-# → "New version available: v1.1.0" / "You are up-to-date."
+# → "New version available: v1.2.0" / "You are up-to-date."
 
 # Skip the prompt (for automation / non-interactive shells).
 sudo ubxcert update --yes
@@ -117,7 +142,7 @@ sudo ubxcert update --check     # peek, no install
 
 State under `/etc/ubxcert/` and the auto-renewal cron job are
 preserved across the upgrade. After the update, `ubxcert --version`
-should report `v1.1.0`.
+should report `v1.2.0`.
 
 #### Path 2 — old binary that predates `self-update`
 
@@ -131,7 +156,7 @@ curl -fsSL https://raw.githubusercontent.com/ubxty/ubxcert/main/install-ubxcert.
 ```
 
 The installer always pulls the latest main branch (not a tagged
-release), so this gives you v1.1.0 immediately. After it finishes,
+release), so this gives you v1.2.0 immediately. After it finishes,
 `sudo ubxcert update` works for future upgrades.
 
 #### Path 3 — dev box installed via the `git@infoubx` path-repo
@@ -160,91 +185,68 @@ After that, `sudo ubxcert update` works normally.
 
 ## Quick Start
 
-### 1 — Request a certificate
+### Default — one command, fully automatic
 
-**Wildcard cert (DNS-01, default):**
+For a single-domain certificate on a server with a running nginx / openresty / apache, this is the entire flow:
+
 ```bash
-ubxcert request \
-  --domains "*.example.com,example.com" \
-  --email admin@example.com
+sudo ubxcert request --domains "example.com" --email admin@example.com
 ```
-ubxcert prints DNS TXT challenge values — add them to your DNS provider (Cloudflare, cPanel, etc.).
 
-**Single-domain cert (HTTP-01, faster, no DNS work):**
+Under the hood:
+
+1. `--challenge http` is selected automatically (no `*.` in the domain list).
+2. The active web server is detected (`nginx → openresty → apache → caddy → litespeed → lighttpd → nginx-unit`).
+3. The site's document root is resolved from the vhost config.
+4. The ACME challenge file is written to `<docroot>/.well-known/acme-challenge/<token>` and probed on the public URL.
+5. `complete` polls the endpoint, finalizes the order, and downloads the cert to `/etc/ubxcert/certs/example.com/`.
+6. `install` injects `ssl_certificate` / `ssl_certificate_key` directives into the vhost and reloads the server.
+
+### Wildcard — DNS-01
+
 ```bash
-ubxcert request \
-  --domains "example.com" \
-  --email admin@example.com \
-  --challenge http
+ubxcert request --domains "*.example.com,example.com" --email admin@example.com
 ```
-**v1.1.0+: ubxcert auto-detects the active web server (nginx, openresty,
-apache, caddy, litespeed, lighttpd, or nginx-unit), finds the site's
-document root, writes the challenge file, and verifies reachability from
-the public internet.** No manual `echo`, no DNS dance.
 
-Want to print the challenge and serve the file yourself instead? Use
-`--no-auto-webroot` (or `--webroot=/path` to override detection) — see
-[HTTP-01 Single-Domain Certificates](#http-01-single-domain-certificates)
-below.
-
-### 2 — Complete the order (verify challenge + download cert)
+`--challenge dns` is selected automatically because the list contains a wildcard. The order is created and the DNS TXT records are printed. **Add them to your DNS provider (Cloudflare, cPanel, etc.)**, then finish the chain:
 
 ```bash
-# DNS-01 (wildcard or single-domain)
 ubxcert complete --domain example.com --wait-dns 600
-
-# HTTP-01 (single-domain only)
-ubxcert complete --domain example.com --challenge http --wait-http 60
+ubxcert install  --domain example.com --webserver openresty|nginx|apache
 ```
 
-`--wait-dns 600` polls DNS up to 10 minutes. `--wait-http 60` polls the HTTP-01 endpoint up to 60 seconds. The certificate is saved to `/etc/ubxcert/certs/example.com/`.
+The auto-chain does **not** run for DNS-01 — adding TXT records requires manual work in your DNS provider, and no DNS provider integration is in scope for v1.2.0.
 
-### 3 — Install into your web server
+### Opt out — preview / step-by-step
 
 ```bash
-ubxcert install --domain example.com --webserver openresty
-# or nginx / apache
+ubxcert request --domains "example.com" --email admin@example.com --no-auto
+# → prints HTTP-01 challenge body; finish manually:
+ubxcert complete --domain example.com --wait-http 60
+ubxcert install  --domain example.com --webserver openresty
 ```
 
-### 4 — Check all certificates
+Use `--no-auto` when you want to preview the challenge value or finish the chain by hand. To skip the auto-webroot write entirely (useful behind a CDN or when an external process owns `/.well-known/`), add `--no-auto-webroot` or set `--webroot=/path` to a custom staging directory. See [HTTP-01 Single-Domain Certificates](#http-01-single-domain-certificates).
+
+### Inspect + renew
 
 ```bash
-ubxcert list
-```
-
-### 5 — Renew automatically
-
-```bash
-ubxcert renew --all
-```
-
-Auto-renewal cron (installed by `install-ubxcert.sh`):
-
-```
-15 3 * * *  root  /usr/local/bin/ubxcert renew --all --days-before 30 >> /var/log/ubxcert/renew.log 2>&1
+ubxcert list        # all certs (ubxcert + certbot) with expiry
+ubxcert renew --all # auto-renewal loop; daily via /etc/cron.d/ubxcert-renew
 ```
 
 ---
 
 ## Interactive Wizard
 
-For a guided, step-by-step setup:
+For a guided setup that picks the site for you (detects the web server, lists vhosts with SSL status, and drives the issue+install chain):
 
 ```bash
-ubxcert wizard
+ubxcert wizard                # interactive, picks a vhost, issues + installs the cert
+ubxcert wizard --staging      # safe dry-run against LE staging
 ```
 
-The wizard:
-1. Detects your running web server (nginx / openresty / apache)
-2. Lists all configured virtual hosts with SSL status
-3. Lets you pick a site by number or domain name
-4. Asks for wildcard or single-domain cert
-5. Runs `request`, pauses for you to add DNS TXT records, then runs `complete`
-6. Optionally installs the cert into your web server
-
-```bash
-ubxcert wizard --staging   # safe dry-run against LE staging
-```
+The wizard is most useful when you have multiple vhosts and don't want to look up which domain maps where — for a one-off `request` against a known domain, the bare command above is faster.
 
 ---
 
@@ -252,7 +254,7 @@ ubxcert wizard --staging   # safe dry-run against LE staging
 
 | Command | Description |
 |---|---|
-| `request` | Create ACME order; print challenge values (DNS-01 TXT or HTTP-01 file body) |
+| `request` | Create ACME order; chain `complete` + `install` by default for HTTP-01 |
 | `complete` | Verify challenge (DNS or HTTP), finalize order, download + save certificate |
 | `install` | Inject cert into web server vhost and reload |
 | `renew` | Renew one or all certs expiring within N days |
@@ -272,19 +274,31 @@ All commands support `--help` and `--json`.
 ### `ubxcert request`
 
 ```
+# Default — issues the cert AND installs it on the active web server
+ubxcert request --domains "example.com" --email admin@example.com
+
+# Wildcard cert (DNS-01 auto-selected because of the *. )
 ubxcert request --domains "*.example.com,example.com" --email admin@example.com
-ubxcert request --domains "site.com" --email admin@site.com --staging --force
-ubxcert request --domains "site.com" --email admin@site.com --challenge http
+
+# Manual / preview (opt out of the auto-chain)
+ubxcert request --domains "example.com" --email admin@example.com --no-auto
 ```
 
 | Option | Description |
 |---|---|
-| `--domains` | Comma-separated list (wildcard supported with `--challenge dns` only) |
+| `--domains` | Comma-separated list (wildcards only valid with `--challenge dns`) |
 | `--email` | ACME account email |
-| `--challenge` | `dns` (default) or `http`. HTTP-01 is faster (no DNS propagation) but does not support wildcards. |
-| `--force` | Discard existing pending order and start fresh |
-| `--staging` | Use LE staging (no rate limits, fake cert) |
-| `--json` | Output challenge data as JSON |
+| `--challenge` | Default = `http` when no domain is a wildcard, `dns` otherwise. Override with `dns` or `http`. |
+| `--no-auto` | Opt out of the default `request → complete → install` chain. Prints the challenge values; finish with `complete` + `install` by hand. |
+| `--install-webserver` | Force the install step to use `openresty` \| `nginx` \| `apache`. Default = the webserver that owns the domain's vhost docroot, falling back to the first running web server. |
+| `--wait-http N` | Override the HTTP-01 polling timeout in the auto-chain (default: `120`). Env: `UBXCERT_AUTO_WAIT_HTTP`. |
+| `--wait-dns N` | Override the suggested DNS-01 polling window printed for the manual `complete` step (default: `600`). Env: `UBXCERT_AUTO_WAIT_DNS`. |
+| `--auto-webroot` | *(default for HTTP-01)* auto-detect the webserver + docroot, write `/.well-known/acme-challenge/<token>`, and verify reachability. |
+| `--no-auto-webroot` | Print HTTP-01 challenges only; do not write to the docroot. Useful behind a CDN or when an external process owns the well-known path. |
+| `--webroot=DIR` | Override the auto-detected docroot (or supply one when `--no-auto-webroot` is set). |
+| `--force` | Discard any existing pending order and create a fresh one. |
+| `--staging` | Use Let's Encrypt staging (no rate limits, fake cert). |
+| `--json` | Output challenge data as JSON. With the auto-chain on, the envelope contains an `auto_chain` block summarising `complete` + `install`. |
 
 For `--challenge http`, the JSON output includes, per domain:
 
@@ -298,22 +312,33 @@ For `--challenge http`, the JSON output includes, per domain:
 }
 ```
 
-The script-side caller writes `key_authorization` to that file path before invoking `ubxcert complete`.
+A script-side caller (with `--no-auto`) writes `key_authorization` to that file path before invoking `ubxcert complete`.
+
+**Behaviour:** `request` first registers (or reuses) a Let's Encrypt account for `--email`, creates the ACME order, computes the challenge values, persists order state to `/etc/ubxcert/orders/<domain>/state.json`, and:
+
+- For HTTP-01 single domains: serves the challenge file at the detected docroot, polls the public URL, finalises the order, downloads the cert, and installs it into the detected vhost + reloads.
+- For DNS-01 / wildcards: prints the `_acme-challenge.<domain>` TXT records. The auto-chain stops here (no DNS provider integration is in scope for v1.2.0).
 
 ### `ubxcert complete`
 
 ```
-ubxcert complete --domain example.com --wait-dns 600
-ubxcert complete --domain example.com --challenge http --wait-http 60
+ubxcert complete --domain example.com
+ubxcert complete --domain example.com --wait-http 60          # HTTP-01
+ubxcert complete --domain example.com --wait-dns  600         # DNS-01
 ```
+
+`request` invokes `complete` automatically for HTTP-01 single domains. You only need to run it by hand when you used `--no-auto` or are completing a DNS-01 order.
 
 | Option | Description |
 |---|---|
 | `--domain` | Base domain (must match the one used in `request`) |
 | `--challenge` | Override challenge type detection (`dns` or `http`). Usually inferred from the saved order state. |
-| `--wait-dns` | Seconds to poll DNS for TXT propagation (default: 0). DNS-01 only. |
-| `--wait-http` | Seconds to poll `http://<domain>/.well-known/acme-challenge/<token>` (default: 0). HTTP-01 only. |
-| `--staging` | Must match flag used in `request` |
+| `--wait-dns` | Seconds to poll DNS for TXT propagation (default: `0` — no wait, ACME validates on trigger). DNS-01 only. |
+| `--wait-http` | Seconds to poll `http://<domain>/.well-known/acme-challenge/<token>` (default: `0` — no wait). HTTP-01 only. |
+| `--auto-webroot` / `--no-auto-webroot` | Same semantics as on `request`. |
+| `--webroot=DIR` | Override the detected docroot. |
+| `--staging` | Must match the flag used in `request`. |
+| `--json` | Output cert details as JSON. |
 
 Files created: `/etc/ubxcert/certs/<domain>/{cert,chain,fullchain,privkey}.pem`  
 Symlinks: `/etc/letsencrypt/live/<domain>/` → same files (certbot compat)
@@ -323,9 +348,22 @@ Symlinks: `/etc/letsencrypt/live/<domain>/` → same files (certbot compat)
 ```
 ubxcert install --domain example.com --webserver openresty
 ubxcert install --domain example.com --webserver nginx --conf /etc/nginx/sites-available/mysite.conf
+ubxcert install --domain example.com --webserver apache --conf /etc/apache2/sites-available/mysite-le-ssl.conf
 ```
 
-Supported: `nginx`, `openresty`, `apache`
+`request` invokes `install` automatically for HTTP-01 single domains. You only need to run it by hand when you used `--no-auto`, are reinstalling into a different webserver, or your vhost config isn't at the default path.
+
+| Option | Description |
+|---|---|
+| `--domain` | Domain whose certificate to install |
+| `--webserver` | `openresty` \| `nginx` \| `apache` |
+| `--conf` | Override the vhost config path (auto-detected by default) |
+
+Default config paths:
+
+- openresty: `/usr/local/openresty/nginx/conf/sites-available/<domain>.conf`
+- nginx: `/etc/nginx/sites-available/<domain>.conf`
+- apache: `/etc/apache2/sites-available/<domain>-le-ssl.conf`
 
 ### `ubxcert renew`
 
@@ -488,27 +526,22 @@ The trade-off is the server itself must serve the challenge file on port 80.
 > must be the `key_authorization` string **verbatim**, with no trailing
 > whitespace.
 
-### Auto mode (default, v1.1.0+)
+### Auto mode (default, v1.2.0+)
 
-The recommended path — ubxcert does everything end-to-end:
+This is the recommended path — `ubxcert request` does everything end-to-end (request → complete → install) in a single command:
 
 ```bash
-# 1. Request — ubxcert detects the webserver, finds the docroot,
-#    writes the challenge file, and verifies reachability.
-ubxcert request \
+sudo ubxcert request \
   --domains "example.com" \
-  --email admin@example.com \
-  --challenge http
+  --email admin@example.com
 
-# 2. Complete — same as before; ubxcert re-writes the file idempotently
-#    if needed and cleans it up automatically once the cert is issued.
-ubxcert complete \
-  --domain example.com \
-  --challenge http \
-  --wait-http 60
+# Equivalent in older releases was the two-step form:
+#   ubxcert request  --domains "example.com" --email admin@example.com --challenge http
+#   ubxcert complete --domain example.com --challenge http --wait-http 60
+#   ubxcert install  --domain example.com --webserver openresty|nginx|apache
 ```
 
-What `request` does for HTTP-01:
+What `request` does behind the scenes for HTTP-01 single domains:
 
 1. Auto-detects the running webserver via `systemctl` (priority order:
    nginx → openresty → apache → caddy → litespeed → lighttpd → nginx-unit).
@@ -520,51 +553,66 @@ What `request` does for HTTP-01:
    `key_authorization` body, mode 0644.
 4. Probes `http://<domain>/.well-known/acme-challenge/<token>` from the
    public internet and confirms the body roundtrips exactly.
+5. Polls the endpoint (`--wait-http 120` by default) until ACME validates,
+   then finalises the order and downloads the cert chain.
+6. Injects `ssl_certificate` / `ssl_certificate_key` into the vhost and
+   reloads the web server.
 
 You should see something like:
 
 ```
 ✓ HTTP-01 auto-served: /var/www/example.com/.well-known/acme-challenge/<token>
   (verified at http://example.com/.well-known/acme-challenge/<token>)
+--- Auto-chain: complete ---
+✓ HTTP-01 reachable for example.com
+✓ All challenges validated.
+✓ Certificate issued and saved!
+--- Auto-chain: install ---
+  webserver : openresty
+✓ OpenResty config test passed.
+✓ OpenResty reloaded.
+✓ Auto-chain complete: cert installed on openresty for example.com.
 ```
 
-If verification fails, the file is still in place — the operator can
-retry with `ubxcert complete --wait-http 60` once port 80 / DNS is fixed.
-
-Override the auto-detected docroot with `--webroot=/srv/www/staging`, or
-opt out entirely with `--no-auto-webroot`.
-
-### Manual mode (`--no-auto-webroot`)
-
-Useful when:
-
-- You're behind a CDN that intercepts port 80 (Cloudflare orange-clouded,
-  CloudFront, Fastly) — the ACME server will fetch from the origin, and
-  the origin needs to serve from a custom staging directory.
-- A separate process (auth service, reverse proxy) owns the
-  `/.well-known/` path on the domain.
-- The webserver config is intentionally not parseable (template-generated,
-  immutable image, etc.).
+If auto-webroot verification fails, the file is still in place — the operator can
+retry the install step once port 80 / DNS is fixed:
 
 ```bash
-# Print the challenge values as JSON; serve the file yourself.
+sudo ubxcert install --domain example.com --webserver openresty
+```
+
+Override the auto-detected docroot with `--webroot=/srv/www/staging`; force a
+specific webserver with `--install-webserver nginx`; opt out of the entire chain
+with `--no-auto`.
+
+### Manual mode (`--no-auto`)
+
+Use `--no-auto` when you want to preview the challenge value, finish the
+chain by hand, or run only one of the steps for a retry.
+
+```bash
+# Print the challenge values and stop.
+ubxcert request --domains "example.com" --email admin@example.com --no-auto
+
+# Then run complete + install only after the operator is ready.
+ubxcert complete --domain example.com --wait-http 60
+ubxcert install  --domain example.com --webserver openresty
+```
+
+To skip the auto-write of the challenge file entirely — useful behind a
+CDN that intercepts port 80, when an external process owns the
+`/.well-known/` path, or for template-generated vhosts that aren't
+parseable — add `--no-auto-webroot` (or `--webroot=/path` to point at a
+custom staging directory). The operator must serve the file manually:
+
+```bash
+# ubxcert writes the challenge body to JSON; serve it yourself.
 ubxcert request \
   --domains "example.com" \
   --email admin@example.com \
   --challenge http \
-  --no-auto-webroot
-
-# Or: let ubxcert write the file but to a directory you specify.
-ubxcert request \
-  --domains "example.com" \
-  --email admin@example.com \
-  --challenge http \
-  --webroot=/var/www/acme-staging
-
-# Serve the key_authorization body at:
-#   http://example.com/.well-known/acme-challenge/<token>
-# Then complete as normal:
-ubxcert complete --domain example.com --challenge http --wait-http 60
+  --no-auto-webroot \
+  --json
 ```
 
 ### Troubleshooting
@@ -581,16 +629,28 @@ ubxcert complete --domain example.com --challenge http --wait-http 60
 
 ## Wildcard Certificates
 
+Wildcards (`*.example.com`) always use DNS-01 because HTTP-01 cannot serve
+wildcard identifiers (RFC 8555 §7.2). For single-domain wildcards, one cert
+covers both `*.example.com` (all subdomains) and the bare `example.com`.
+
 ```bash
+# 1. Request — prints the _acme-challenge TXT records.
 ubxcert request \
   --domains "*.example.com,example.com" \
   --email admin@example.com
 
-# Add the _acme-challenge TXT records shown, then:
+# 2. Add the _acme-challenge TXT records printed above to your DNS.
+
+# 3. Complete — verifies DNS and downloads the cert.
 ubxcert complete --domain example.com --wait-dns 600
+
+# 4. Install — explicitly, because DNS-01 never auto-installs.
+ubxcert install  --domain example.com --webserver openresty|nginx|apache
 ```
 
-One cert covers both `*.example.com` (all subdomains) and the bare `example.com`.
+The auto-chain (`--no-auto` not set) still issues the order, but the chain
+stops at `request` and prints a yellow note explaining the manual TXT-record
+step. No DNS provider integration is in scope for v1.2.0.
 
 ---
 
@@ -686,11 +746,10 @@ release is detected on a real TTY, this command asks before installing:
 ```
   ubxcert version check
   ────────────────────────────────────────────
-  Installed : v1.0.0
-  Latest    : v1.1.0
+  Installed : v1.2.0
+  Latest    : v1.2.0
 
-  A new version is available: v1.1.0 (current v1.0.0).
-  Update now? [y/N] _
+  You are up-to-date.
 ```
 
 The prompt is **silently skipped** in non-interactive contexts (cron,

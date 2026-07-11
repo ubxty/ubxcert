@@ -60,6 +60,10 @@ class DeleteCommand extends BaseCommand
         $useCertbot = $this->hasFlag($args, 'certbot');
         $force     = $this->hasFlag($args, 'force');
 
+        if ($useCertbot) {
+            $this->warn('The --certbot flag is deprecated. ubxcert handles all cert cleanup; this flag will be removed in a future release.');
+        }
+
         if (!$all && !$domain) {
             $this->fail('Usage: ubxcert delete --domain <domain> [--purge] [--keep-cert|--keep-state] [--certbot] [--json]');
             $this->fail('   or: ubxcert delete --all [--purge] [--certbot] [--json]');
