@@ -4,3 +4,31 @@ vendor/
 *.swp
 .DS_Store
 temp/
+
+# --- AI / Claude / assistant tool artifacts — DO NOT COMMIT ---
+# Claude Code (Anthropic)
+.claude/
+CLAUDE.md
+AGENTS.md
+.claude.json
+.claude.jsonl
+
+# Editor AI assistants
+.aider*
+.aider.conf.yml
+.cursor/
+.cursorrules
+.windsurf/
+.continue/
+.cline/
+.cody/
+.tabnine/
+.codeium/
+.copilot/
+
+# Generative markers (broad — catches accidental AI-tool output files)
+*anthropic*
+*claude*
+*aider*
+*copilot*
+*gpt-*
