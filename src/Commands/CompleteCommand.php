@@ -49,6 +49,9 @@ class CompleteCommand extends BaseCommand
         $challenge    = $challengeOpt !== null ? strtolower($challengeOpt) : null;
         $explicitRoot = $this->extractOption($args, 'webroot');
         $autoWebroot  = !$this->hasFlag($args, 'no-auto-webroot');
+        $pollAcme     = $this->hasFlag($args, 'poll-acme');
+        $pollInterval = (int) ($this->extractOption($args, 'poll-interval') ?? 5);
+        $pollTimeout  = (int) ($this->extractOption($args, 'poll-timeout') ?? 60);
 
         if (!$domain) {
             $this->fail('Usage: ubxcert complete --domain example.com [--wait-dns 600 | --wait-http 60 --challenge http] [--staging] [--json]');
@@ -87,6 +90,9 @@ class CompleteCommand extends BaseCommand
         $this->out("Completing ACME order for: {$domain}");
         $this->out("Order status : {$state['order_status']}");
         $this->out("Challenge    : " . ($isHttp ? 'HTTP-01' : 'DNS-01'));
+        if ($pollAcme) {
+            $this->out("Poll mode    : ACME (interval={$pollInterval}s, timeout={$pollTimeout}s)");
+        }
 
         // --- Auto-webroot (HTTP-01 only, default ON, idempotent) ----------
         // Files are only written if they do not already exist on disk, so a
@@ -202,7 +208,11 @@ class CompleteCommand extends BaseCommand
         if ($order['status'] !== 'valid') {
             $this->out('Polling for certificate issuance...');
             try {
-                $order = $this->pollOrderUntil($client, $accountJws, $kid, $state['order_url'], ['valid'], $state);
+                if ($pollAcme) {
+                    $order = $this->pollAcmeUntil($client, $accountJws, $kid, $state['order_url'], 'valid', $pollInterval, $pollTimeout);
+                } else {
+                    $order = $this->pollOrderUntil($client, $accountJws, $kid, $state['order_url'], ['valid'], $state);
+                }
             } catch (Throwable $e) {
                 $this->fail("Order final polling failed: " . $e->getMessage());
                 return 1;
@@ -523,6 +533,41 @@ class CompleteCommand extends BaseCommand
         }
 
         throw new \RuntimeException("Order did not reach " . implode('/', $targetStatuses) . " after " . (self::MAX_ORDER_POLLS * self::POLL_INTERVAL_SECS) . "s.");
+    }
+
+    /**
+     * Custom ACME poll loop with operator-controlled interval and timeout.
+     * Used by `--poll-acme` to wait for cert issuance without depending on
+     * the local HTTP-01 file or DNS-01 reachability checks.
+     */
+    private function pollAcmeUntil(
+        AcmeClient $client,
+        JwsHelper  $jws,
+        string     $kid,
+        string     $orderUrl,
+        string     $targetStatus,
+        int        $interval,
+        int        $timeout
+    ): array {
+        $deadline = time() + $timeout;
+        $attempt  = 0;
+        while (time() < $deadline) {
+            $attempt++;
+            $order = $client->getOrderStatus($jws, $kid, $orderUrl);
+            $this->verbose("ACME poll {$attempt}: status={$order['status']}");
+
+            if ($order['status'] === 'invalid') {
+                return $order;
+            }
+            if ($order['status'] === $targetStatus) {
+                return $order;
+            }
+
+            $this->out("  [{$attempt}] order status: {$order['status']} (waiting for {$targetStatus})");
+            sleep($interval);
+        }
+
+        throw new \RuntimeException("Order did not reach '{$targetStatus}' after {$timeout}s of ACME polling.");
     }
 
     // -------------------------------------------------------------------------

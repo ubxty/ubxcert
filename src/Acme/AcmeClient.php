@@ -252,12 +252,62 @@ class AcmeClient
         ?string    $kid,
         string     $accept = 'application/json'
     ): array {
+        $maxAttempts = 3;
         $body = $jws->sign($url, $payload, $nonce, $kid);
 
-        return $this->rawPost($url, $body, [
-            'Content-Type: application/jose+json',
-            "Accept: {$accept}",
-        ]);
+        // The ACME server may reject a request with `badNonce` if our
+        // locally cached nonce expired between fetch and submit. Retry
+        // up to $maxAttempts times, fetching a fresh nonce each time.
+        // Honour the Retry-After header the server may send.
+        for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
+            $response = $this->rawPost($url, $body, [
+                'Content-Type: application/jose+json',
+                "Accept: {$accept}",
+            ]);
+
+            if ($response['status'] !== 400 || !$this->isBadNonce($response['body'])) {
+                return $response;
+            }
+
+            // badNonce — fetch a fresh nonce and re-sign the request.
+            $this->newNonce();
+            $nonce = $this->currentNonce();
+            $body  = $jws->sign($url, $payload, $nonce, $kid);
+
+            $retryAfter = $this->extractRetryAfter($response['headers']);
+            if ($retryAfter > 0) {
+                sleep($retryAfter);
+            }
+        }
+
+        return $response;
+    }
+
+    /**
+     * Detect the `urn:ietf:params:acme:error:badNonce` error code in an
+     * ACME error body. Cheap parse — no need for full JSON decode.
+     */
+    private function isBadNonce(string $body): bool
+    {
+        return str_contains($body, 'badNonce');
+    }
+
+    /**
+     * Read the Retry-After header value (in seconds). Returns 0 if
+     * absent or unparseable.
+     */
+    private function extractRetryAfter(array $headers): int
+    {
+        $value = $headers['retry-after'] ?? null;
+        if ($value === null) {
+            return 0;
+        }
+        if (ctype_digit(trim($value))) {
+            return (int) trim($value);
+        }
+        // HTTP-date format — try to parse. If we can't, fall back to 0.
+        $ts = @strtotime($value);
+        return $ts !== false ? max(0, $ts - time()) : 0;
     }
 
     private function rawGet(string $url): array

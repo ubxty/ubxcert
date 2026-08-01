@@ -174,6 +174,89 @@ check(
     'built=' . json_encode($built)
 );
 
+// --- 6. buildChallengeOutput emits multi-domain batch metadata (#1)
+$multi = $sample;
+$multi['domains'] = ['example.com', 'www.example.com', 'api.example.com'];
+$builtMulti = $bco->invoke($req, $multi);
+check(
+    'buildChallengeOutput sets domain_count',
+    ($builtMulti['domain_count'] ?? null) === 3,
+    'domain_count=' . ($builtMulti['domain_count'] ?? '(missing)')
+);
+check(
+    'buildChallengeOutput sets multi_domain=true',
+    ($builtMulti['multi_domain'] ?? null) === true,
+    'multi_domain=' . json_encode($builtMulti['multi_domain'] ?? null)
+);
+check(
+    'buildChallengeOutput sets primary_domain',
+    ($builtMulti['primary_domain'] ?? null) === 'example.com',
+    'primary_domain=' . ($builtMulti['primary_domain'] ?? '(missing)')
+);
+
+// --- 7. Config class reads /etc/ubxcert/config.json (#5)
+use Ubxty\UbxCert\Config\Config;
+$tmpConfig = tempnam(sys_get_temp_dir(), 'ubxcert-cfg-');
+file_put_contents($tmpConfig . '.json', json_encode([
+    'default_staging' => true,
+    'renewal_days_before' => 45,
+    'cloudflare' => ['api_token' => 'secret', 'zone_id' => 'Z'],
+]));
+@unlink($tmpConfig);
+$cfg = new Config($tmpConfig . '.json');
+@rename($tmpConfig, $tmpConfig . '.json');
+check(
+    'Config reads default_staging=true',
+    $cfg->get('default_staging') === true,
+    'got=' . var_export($cfg->get('default_staging'), true)
+);
+check(
+    'Config reads renewal_days_before=45',
+    $cfg->get('renewal_days_before') === 45,
+    'got=' . var_export($cfg->get('renewal_days_before'), true)
+);
+check(
+    'Config reads nested cloudflare.zone_id',
+    $cfg->get('cloudflare')['zone_id'] === 'Z',
+    'cf=' . json_encode($cfg->get('cloudflare'))
+);
+@unlink($tmpConfig . '.json');
+
+// --- 8. Quiet events parseCommonArgs flag (#16)
+$quietCmd = new class extends BaseCommand {
+    public function getName(): string { return 'quiet'; }
+    public function getDescription(): string { return 'q'; }
+    public function run(array $args): int { return 0; }
+};
+$qpca = new ReflectionMethod($quietCmd, 'parseCommonArgs');
+$qpca->setAccessible(true);
+$args = ['--quiet-events', '--json'];
+$qpca->invokeArgs($quietCmd, [&$args]);
+$qp = new ReflectionProperty($quietCmd, 'quietEvents');
+$qp->setAccessible(true);
+check(
+    'parseCommonArgs handles --quiet-events',
+    $qp->getValue($quietCmd) === true,
+    'quietEvents=' . var_export($qp->getValue($quietCmd), true)
+);
+
+$args2 = ['--no-staging'];
+$noStagingCmd = new class extends BaseCommand {
+    public function getName(): string { return 'ns'; }
+    public function getDescription(): string { return 'ns'; }
+    public function run(array $args): int { return 0; }
+};
+$qpca2 = new ReflectionMethod($noStagingCmd, 'parseCommonArgs');
+$qpca2->setAccessible(true);
+$qpca2->invokeArgs($noStagingCmd, [&$args2]);
+$sp = new ReflectionProperty($noStagingCmd, 'staging');
+$sp->setAccessible(true);
+check(
+    'parseCommonArgs handles --no-staging',
+    $sp->getValue($noStagingCmd) === false,
+    'staging=' . var_export($sp->getValue($noStagingCmd), true)
+);
+
 if ($failures) {
     echo "\nFAILED: " . count($failures) . " check(s)\n";
     exit(1);

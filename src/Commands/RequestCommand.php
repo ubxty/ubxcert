@@ -65,9 +65,12 @@ class RequestCommand extends BaseCommand
         $waitDnsOpt        = $this->extractOption($args, 'wait-dns');
         $installWebserver  = $this->extractOption($args, 'install-webserver');
         $challengeOverride = $this->extractOption($args, 'challenge');
+        $renew             = $this->hasFlag($args, 'renew');
+        $quietEvents       = $this->hasFlag($args, 'quiet-events');
+        $precheck          = $this->hasFlag($args, 'precheck');
 
         if (!$domainsRaw || !$email) {
-            $this->emitErrorJson('usage', 'Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--no-auto] [--staging] [--force] [--json]');
+            $this->emitErrorJson('usage', 'Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--no-auto] [--staging] [--force] [--renew] [--precheck] [--json]');
             return 1;
         }
 
@@ -122,6 +125,22 @@ class RequestCommand extends BaseCommand
                 $this->out("Existing pending order found. Use --force to create a new one.");
                 return $this->outputChallenges($existing);
             }
+        }
+
+        // --- --renew: skip the new ACME order, run complete → install on the
+        // existing cert subject. Cheaper than --force, no rate-limit exposure.
+        if ($renew) {
+            $certDir = $this->state->getCertDir($baseDomain);
+            if (!file_exists($certDir . '/fullchain.pem')) {
+                $this->emitErrorJson('no_existing_cert', "No existing certificate for {$baseDomain}. Run 'ubxcert request' (without --renew) first.");
+                return 1;
+            }
+            return $this->renewExisting($baseDomain, $domains, $challenge, $waitHttpOpt, $waitDnsOpt, $installWebserver, $quietEvents);
+        }
+
+        // --- --precheck: dry-run validation. Emits JSON with checks[].
+        if ($precheck) {
+            return $this->runPrecheck($baseDomain, $domains, $challenge, $email);
         }
 
         // --- Resolve ACME account -------------------------------------------
@@ -321,6 +340,281 @@ class RequestCommand extends BaseCommand
             }
         }
         return $results;
+    }
+
+    // -------------------------------------------------------------------------
+    // --renew: skip the ACME order, re-run complete→install on the existing cert
+    // -------------------------------------------------------------------------
+
+    /**
+     * Re-issue and re-install the existing certificate without contacting
+     * the ACME server for a new order. The new cert keeps the same domain
+     * subject, so no DNS-01 or HTTP-01 challenges are required.
+     *
+     * Implementation: build a synthetic state from the existing fullchain.pem
+     * + the previously-saved order state, then run the same auto-chain
+     * logic that `request --auto` would use.
+     */
+    private function renewExisting(
+        string $baseDomain,
+        array $domains,
+        string $challenge,
+        ?string $waitHttpOpt,
+        ?string $waitDnsOpt,
+        ?string $installWebserver,
+        bool $quietEvents
+    ): int {
+        $this->out("Renewing existing certificate for {$baseDomain} (no new ACME order).");
+
+        $state = $this->state->loadOrderState($baseDomain) ?? [
+            'domain'          => $baseDomain,
+            'domains'         => $domains,
+            'email'           => null,
+            'staging'         => $this->staging,
+            'challenge_type'  => $challenge,
+            'order_status'    => 'valid',
+            'created_at'      => date('c'),
+            'completed_at'    => date('c'),
+            'challenges'      => [],
+        ];
+
+        // In --renew mode we skip the ACME round-trip entirely. Always force
+        // the auto-chain (`complete` becomes a no-op since the cert is already
+        // on disk; `install` re-wires the vhost).
+        return $this->runAutoChain(
+            $baseDomain,
+            $domains,
+            $challenge,
+            $waitHttpOpt,
+            $waitDnsOpt,
+            $installWebserver,
+            $this->staging,
+            $this->jsonMode,
+            $this->verbose || !$quietEvents,
+            $state
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // --precheck: dry-run validation
+    // -------------------------------------------------------------------------
+
+    /**
+     * Run a battery of checks without issuing an ACME order. Emits JSON
+     * with `{status, checks: [{name, ok, message, ...}]}` so the panel
+     * can render a "Will this work?" wizard before the user commits.
+     */
+    private function runPrecheck(string $baseDomain, array $domains, string $challenge, string $email): int
+    {
+        $checks = [];
+
+        // --- 1. ACME account exists or can be created ------------------------
+        $checks[] = $this->precheckAccount($email);
+
+        // --- 2. Webserver detection -------------------------------------------
+        $checks[] = $this->precheckWebserver();
+
+        // --- 3. Docroot writability (HTTP-01 only) ---------------------------
+        if ($challenge === self::CHALLENGE_HTTP) {
+            $checks[] = $this->precheckDocroot($baseDomain);
+        }
+
+        // --- 4. DNS resolution for the domain (HTTP-01) -----------------------
+        $checks[] = $this->precheckDns($baseDomain);
+
+        // --- 5. PHP extensions -----------------------------------------------
+        $checks[] = $this->precheckExtensions();
+
+        // --- 6. Existing cert optional (informational) -----------------------
+        $checks[] = $this->precheckExistingCert($baseDomain);
+
+        // --- 7. Reachability of http://domain from local interface -----------
+        if ($challenge === self::CHALLENGE_HTTP) {
+            $checks[] = $this->precheckLocalReachability($baseDomain);
+        }
+
+        $allOk = !in_array(false, array_map(fn($c) => $c['ok'], $checks), true);
+
+        $payload = [
+            'status'        => $allOk ? 'ready' : 'precheck-failed',
+            'domain'        => $baseDomain,
+            'domains'       => $domains,
+            'challenge'     => $challenge,
+            'checks'        => $checks,
+            'precheck_ok'   => $allOk,
+        ];
+
+        if ($this->jsonMode) {
+            $this->outputJson($payload);
+        } else {
+            $this->out('');
+            $this->out($allOk ? "\033[32m✓ Precheck passed.\033[0m" : "\033[31m✗ Precheck failed.\033[0m");
+            foreach ($checks as $c) {
+                $icon = $c['ok'] ? "\033[32m✓\033[0m" : "\033[31m✗\033[0m";
+                $this->out("  {$icon} {$c['name']}: {$c['message']}");
+            }
+            $this->out('');
+        }
+
+        return $allOk ? 0 : 1;
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckAccount(string $email): array
+    {
+        $exists = $this->state->accountExists($email);
+        return [
+            'name'    => 'acme_account',
+            'ok'      => true,
+            'message' => $exists
+                ? "Account already registered for {$email}"
+                : "Account will be registered on next request ({$email})",
+            'will_register' => !$exists,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckWebserver(): array
+    {
+        $primary = \Ubxty\UbxCert\Util\VhostScanner::detectPrimary();
+        if ($primary === null) {
+            return [
+                'name' => 'webserver',
+                'ok'   => false,
+                'message' => 'No active web server detected. Pass --install-webserver=openresty|nginx|apache to override.',
+                'error_code' => 'no_webserver_detected',
+            ];
+        }
+        return [
+            'name'    => 'webserver',
+            'ok'      => true,
+            'message' => "Active web server: {$primary}",
+            'webserver' => $primary,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckDocroot(string $domain): array
+    {
+        $info = \Ubxty\UbxCert\Util\VhostScanner::resolveDocroot($domain);
+        if ($info === null) {
+            return [
+                'name' => 'docroot',
+                'ok'   => false,
+                'message' => "No document root detected for {$domain}. Pass --webroot=/path to override.",
+                'error_code' => 'no_docroot',
+            ];
+        }
+        if (!is_writable($info['docroot'])) {
+            return [
+                'name' => 'docroot',
+                'ok'   => false,
+                'message' => "Document root not writable: {$info['docroot']}",
+                'docroot' => $info['docroot'],
+                'error_code' => 'docroot_not_writable',
+            ];
+        }
+        return [
+            'name'    => 'docroot',
+            'ok'      => true,
+            'message' => "Document root: {$info['docroot']} (writable)",
+            'docroot' => $info['docroot'],
+            'webserver' => $info['webserver'] ?? null,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckDns(string $domain): array
+    {
+        $ip = @gethostbyname($domain);
+        if ($ip === $domain) {
+            return [
+                'name' => 'dns',
+                'ok'   => false,
+                'message' => "DNS resolution failed for {$domain}",
+                'error_code' => 'dns_resolution_failed',
+            ];
+        }
+        return [
+            'name' => 'dns',
+            'ok'   => true,
+            'message' => "{$domain} -> {$ip}",
+            'ip'   => $ip,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckExtensions(): array
+    {
+        $missing = [];
+        foreach (['openssl', 'json', 'curl'] as $ext) {
+            if (!extension_loaded($ext)) {
+                $missing[] = $ext;
+            }
+        }
+        if (!empty($missing)) {
+            return [
+                'name' => 'php_extensions',
+                'ok'   => false,
+                'message' => 'Missing PHP extensions: ' . implode(', ', $missing),
+                'missing' => $missing,
+                'error_code' => 'missing_php_extensions',
+            ];
+        }
+        return [
+            'name'    => 'php_extensions',
+            'ok'      => true,
+            'message' => 'All required PHP extensions loaded',
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckExistingCert(string $domain): array
+    {
+        $certDir = $this->state->getCertDir($domain);
+        $exists  = file_exists($certDir . '/fullchain.pem');
+        if (!$exists) {
+            return [
+                'name'    => 'existing_cert',
+                'ok'      => true,
+                'message' => "No existing certificate for {$domain} (fresh issuance)",
+                'exists'  => false,
+            ];
+        }
+        $expiry = $this->certs->getCertExpiry($domain);
+        $daysLeft = $expiry !== null ? (int)(($expiry - time()) / 86400) : null;
+        return [
+            'name'    => 'existing_cert',
+            'ok'      => true,
+            'message' => $daysLeft !== null
+                ? "Existing cert expires in {$daysLeft} days"
+                : "Existing cert present (expiry unknown)",
+            'exists'  => true,
+            'days_left' => $daysLeft,
+        ];
+    }
+
+    /** @return array<string, mixed> */
+    private function precheckLocalReachability(string $domain): array
+    {
+        $ctx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
+        $body = @file_get_contents("http://{$domain}/.well-known/acme-challenge/ubxcert-precheck", false, $ctx);
+        $status = isset($http_response_header[0]) ? $http_response_header[0] : '';
+        if ($body === false && $status === '') {
+            return [
+                'name' => 'local_reachability',
+                'ok'   => false,
+                'message' => "Could not reach http://{$domain}/ from local interface. "
+                    . "If the domain is behind a CDN, ensure port 80 is reachable on the origin.",
+                'error_code' => 'local_unreachable',
+            ];
+        }
+        return [
+            'name'    => 'local_reachability',
+            'ok'      => true,
+            'message' => "Reachable: {$status}",
+            'response' => $status,
+        ];
     }
 
     // -------------------------------------------------------------------------
@@ -699,6 +993,9 @@ class RequestCommand extends BaseCommand
         $payload = [
             'domain'         => $state['domain'],
             'domains'        => $state['domains'],
+            'domain_count'   => count($state['domains'] ?? []),
+            'primary_domain' => $state['domain'],
+            'multi_domain'   => count($state['domains'] ?? []) > 1,
             'staging'        => $state['staging'],
             'challenge_type' => $type,
             'order_status'   => $state['order_status'],

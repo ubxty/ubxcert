@@ -22,6 +22,11 @@ use Throwable;
  * handoff to certbot if the operator later wants to manage the
  * same domain with certbot.
  *
+ * Pass --purge-vhost to also remove the SSL directives ubxcert
+ * injected into the web server vhost (only the lines we added —
+ * not the entire vhost). Useful when the site is being removed
+ * entirely and the vhost should be left without SSL.
+ *
  * Pass --certbot to ALSO invoke `certbot delete --cert-name
  * <domain>` for domains that were originally issued by certbot
  * (pre-ubxcert installs). ubxcert will report whatever certbot
@@ -35,6 +40,7 @@ use Throwable;
  * Usage:
  *   ubxcert delete --domain example.com
  *   ubxcert delete --domain example.com --purge
+ *   ubxcert delete --domain example.com --purge --purge-vhost
  *   ubxcert delete --domain example.com --keep-cert
  *   ubxcert delete --domain example.com --certbot
  *   ubxcert delete --all
@@ -55,6 +61,7 @@ class DeleteCommand extends BaseCommand
         $domain    = $this->extractOption($args, 'domain');
         $all       = $this->hasFlag($args, 'all');
         $purge     = $this->hasFlag($args, 'purge');
+        $purgeVhost = $this->hasFlag($args, 'purge-vhost');
         $keepCert  = $this->hasFlag($args, 'keep-cert');
         $keepState = $this->hasFlag($args, 'keep-state');
         $useCertbot = $this->hasFlag($args, 'certbot');
@@ -65,7 +72,7 @@ class DeleteCommand extends BaseCommand
         }
 
         if (!$all && !$domain) {
-            $this->fail('Usage: ubxcert delete --domain <domain> [--purge] [--keep-cert|--keep-state] [--certbot] [--json]');
+            $this->fail('Usage: ubxcert delete --domain <domain> [--purge] [--purge-vhost] [--keep-cert|--keep-state] [--certbot] [--json]');
             $this->fail('   or: ubxcert delete --all [--purge] [--certbot] [--json]');
             return 1;
         }
@@ -83,19 +90,20 @@ class DeleteCommand extends BaseCommand
         $domains = $all ? $this->collectAllDomains() : [$domain];
 
         $summary = [
-            'command'    => 'delete',
-            'domains'    => [],
-            'all'        => $all,
-            'purge'      => $purge,
-            'keep_cert'  => $keepCert,
-            'keep_state' => $keepState,
-            'certbot'    => $useCertbot,
+            'command'     => 'delete',
+            'domains'     => [],
+            'all'         => $all,
+            'purge'       => $purge,
+            'purge_vhost' => $purgeVhost,
+            'keep_cert'   => $keepCert,
+            'keep_state'  => $keepState,
+            'certbot'     => $useCertbot,
         ];
 
         $anyError = false;
 
         foreach ($domains as $d) {
-            $result = $this->deleteOne($d, $purge, $keepCert, $keepState, $useCertbot);
+            $result = $this->deleteOne($d, $purge, $purgeVhost, $keepCert, $keepState, $useCertbot);
             $summary['domains'][] = $result;
             if (!empty($result['errors'])) {
                 $anyError = true;
@@ -138,13 +146,14 @@ class DeleteCommand extends BaseCommand
         return $all;
     }
 
-    private function deleteOne(string $domain, bool $purge, bool $keepCert, bool $keepState, bool $useCertbot): array
+    private function deleteOne(string $domain, bool $purge, bool $purgeVhost, bool $keepCert, bool $keepState, bool $useCertbot): array
     {
         $result = [
             'domain'              => $domain,
             'cert_removed'        => [],
             'state_removed'       => [],
             'purge_removed'       => [],
+            'vhost_cleaned'       => [],
             'certbot_invoked'     => false,
             'certbot_message'     => null,
             'cert_removed_count'  => 0,
@@ -220,6 +229,19 @@ class DeleteCommand extends BaseCommand
             }
         }
 
+        // Purge-vhost = remove injected SSL directives from the vhost
+        if ($purgeVhost) {
+            try {
+                $cleaned = $this->cleanVhostSslDirectives($domain);
+                $result['vhost_cleaned'] = $cleaned;
+                if ($cleaned && !$this->jsonMode) {
+                    $this->success("Removed SSL directives from " . count($cleaned) . " vhost file(s) for {$domain}");
+                }
+            } catch (Throwable $e) {
+                $result['errors'][] = "purge-vhost: " . $e->getMessage();
+            }
+        }
+
         // Optional certbot delegation
         if ($useCertbot) {
             $certbot = $this->findCertbot();
@@ -256,5 +278,56 @@ class DeleteCommand extends BaseCommand
         // Fall back to PATH
         $path = trim((string) shell_exec('command -v certbot 2>/dev/null'));
         return $path !== '' ? $path : null;
+    }
+
+    /**
+     * Remove SSL directives we previously injected into nginx/openresty
+     * vhost files for the given domain. We strip only the lines we
+     * know we wrote: `ssl_certificate`, `ssl_certificate_key`, and
+     * the `listen 443 ssl;` we added if no other SSL block was present.
+     *
+     * Apache is intentionally NOT cleaned here — its cert/key lines
+     * (SSLCertificateFile / SSLCertificateKeyFile) usually live in
+     * a separate -le-ssl.conf, so removing them is the same as
+     * removing the file (handled by --purge).
+     *
+     * @return string[] list of file paths that were cleaned
+     */
+    private function cleanVhostSslDirectives(string $domain): array
+    {
+        $cleaned = [];
+
+        $candidates = [
+            '/usr/local/openresty/nginx/conf/sites-available/' . $domain . '.conf',
+            '/etc/nginx/sites-available/' . $domain . '.conf',
+            '/etc/nginx/conf.d/' . $domain . '.conf',
+            '/etc/nginx/sites-enabled/' . $domain . '.conf',
+        ];
+
+        foreach ($candidates as $confFile) {
+            if (!file_exists($confFile)) {
+                continue;
+            }
+            $content = @file_get_contents($confFile);
+            if ($content === false) {
+                continue;
+            }
+            $original = $content;
+
+            // Strip only the SSL lines we added. Use ^\s* to ensure we
+            // match the directive regardless of indentation, but never
+            // match a comment line.
+            $content = preg_replace('/^\s*ssl_certificate\s+\S+;\s*\n/m', '', $content);
+            $content = preg_replace('/^\s*ssl_certificate_key\s+\S+;\s*\n/m', '', $content);
+
+            if ($content === $original) {
+                continue;
+            }
+            if (@file_put_contents($confFile, $content) !== false) {
+                $cleaned[] = $confFile;
+            }
+        }
+
+        return $cleaned;
     }
 }

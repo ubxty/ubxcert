@@ -7,6 +7,7 @@ namespace Ubxty\UbxCert\Commands;
 use Ubxty\UbxCert\Acme\AcmeClient;
 use Ubxty\UbxCert\Acme\JwsHelper;
 use Ubxty\UbxCert\Cert\CertificateManager;
+use Ubxty\UbxCert\Config\Config;
 use Ubxty\UbxCert\Logger;
 use Ubxty\UbxCert\State\StateManager;
 
@@ -15,17 +16,23 @@ use Ubxty\UbxCert\State\StateManager;
  */
 abstract class BaseCommand
 {
-    protected bool $jsonMode   = false;
-    protected bool $verbose    = false;
-    protected bool $staging    = false;
+    protected bool $jsonMode    = false;
+    protected bool $verbose     = false;
+    protected bool $staging     = false;
+    protected bool $quietEvents = false;
 
     protected StateManager      $state;
     protected CertificateManager $certs;
+    protected Config $config;
 
     public function __construct()
     {
-        $this->state = new StateManager();
-        $this->certs = new CertificateManager($this->state);
+        $this->state  = new StateManager();
+        $this->certs  = new CertificateManager($this->state);
+        $this->config = new Config();
+
+        // Apply config-level defaults; explicit CLI flags still win.
+        $this->staging = $this->staging || $this->config->get('default_staging', false);
     }
 
     abstract public function getName(): string;
@@ -42,6 +49,12 @@ abstract class BaseCommand
     /** Write a line to /var/log/ubxcert/ubxcert.log */
     protected function log(string $level, string $message): void
     {
+        if ($this->quietEvents && $level === 'info') {
+            // --quiet-events: skip routine info-level messages, keep
+            // warnings and errors. Useful for cron-driven renewals
+            // where the operator only wants to see failures.
+            return;
+        }
         Logger::write($level, $this->getName(), $message);
     }
 
@@ -161,6 +174,12 @@ abstract class BaseCommand
                 unset($args[$i]);
             } elseif ($arg === '--staging') {
                 $this->staging = true;
+                unset($args[$i]);
+            } elseif ($arg === '--no-staging') {
+                $this->staging = false;
+                unset($args[$i]);
+            } elseif ($arg === '--quiet-events' || $arg === '--quiet') {
+                $this->quietEvents = true;
                 unset($args[$i]);
             } elseif ($arg === '-v' || $arg === '--verbose') {
                 $this->verbose = true;

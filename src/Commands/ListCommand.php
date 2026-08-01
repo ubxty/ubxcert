@@ -33,6 +33,13 @@ class ListCommand extends BaseCommand
 
         $ubxcertOnly = $this->hasFlag($args, 'ubxcert-only');
         $certbotOnly = $this->hasFlag($args, 'certbot-only');
+        $domain      = $this->extractOption($args, 'domain');
+        $daysBefore  = $this->extractOption($args, 'days-before');
+        $filterExp   = $this->hasFlag($args, 'filter=expiring');
+        $filterExpSoon = $this->hasFlag($args, 'filter=expiring-soon');
+        $filterExpOpt  = $this->extractOption($args, 'filter');
+        $installedOnly = $this->hasFlag($args, 'filter=installed');
+        $uninstalledOnly = $this->hasFlag($args, 'filter=uninstalled');
 
         $rows = $this->discoverAll($ubxcertOnly, $certbotOnly);
 
@@ -50,6 +57,9 @@ class ListCommand extends BaseCommand
             $ob = $order[$b['source']] ?? 3;
             return $oa !== $ob ? $oa - $ob : strcmp($a['domain'], $b['domain']);
         });
+
+        // --- Apply filters (--domain, --days-before, --filter=...) ----------
+        $rows = $this->applyFilters($rows, $domain, $daysBefore, $filterExp, $filterExpSoon, $filterExpOpt, $installedOnly, $uninstalledOnly);
 
         if ($this->jsonMode) {
             $this->outputJson([
@@ -205,6 +215,63 @@ class ListCommand extends BaseCommand
             'wildcard'      => $wildcard,
             'installed_on'  => $installedOn,
         ];
+    }
+
+    // -------------------------------------------------------------------------
+    // Filtering
+    // -------------------------------------------------------------------------
+
+    /**
+     * Apply the --domain, --days-before, and --filter=... reductions to the
+     * discovered set. Filters are AND'd. Returns the filtered rows.
+     *
+     * @param array<int, array<string, mixed>> $rows
+     * @return array<int, array<string, mixed>>
+     */
+    private function applyFilters(
+        array $rows,
+        ?string $domain,
+        ?string $daysBefore,
+        bool $filterExp,
+        bool $filterExpSoon,
+        ?string $filterOpt,
+        bool $installedOnly,
+        bool $uninstalledOnly
+    ): array {
+        if ($domain !== null) {
+            $rows = array_values(array_filter($rows, fn($r) => strcasecmp($r['domain'], $domain) === 0));
+        }
+
+        if ($filterExpSoon) {
+            $rows = array_values(array_filter($rows, fn($r) => $r['days_left'] !== null && $r['days_left'] <= 14));
+        } elseif ($filterExp) {
+            $rows = array_values(array_filter($rows, fn($r) => $r['needs_renewal']));
+        } elseif ($daysBefore !== null) {
+            $threshold = max(0, (int) $daysBefore);
+            $rows = array_values(array_filter($rows, fn($r) => $r['days_left'] !== null && $r['days_left'] <= $threshold));
+        } elseif ($filterOpt !== null) {
+            // Generic --filter=foo resolver
+            $rows = array_values(array_filter($rows, function ($r) use ($filterOpt) {
+                return match (strtolower($filterOpt)) {
+                    'expiring'      => $r['needs_renewal'],
+                    'expiring-soon' => $r['days_left'] !== null && $r['days_left'] <= 14,
+                    'expired'       => $r['days_left'] !== null && $r['days_left'] < 0,
+                    'installed'     => !empty($r['installed_on']),
+                    'uninstalled'   => empty($r['installed_on']),
+                    'wildcard'      => $r['wildcard'] ?? false,
+                    default         => true,
+                };
+            }));
+        }
+
+        if ($installedOnly) {
+            $rows = array_values(array_filter($rows, fn($r) => !empty($r['installed_on'])));
+        }
+        if ($uninstalledOnly) {
+            $rows = array_values(array_filter($rows, fn($r) => empty($r['installed_on'])));
+        }
+
+        return $rows;
     }
 
     // -------------------------------------------------------------------------

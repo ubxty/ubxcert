@@ -33,17 +33,33 @@ class RenewCommand extends BaseCommand
         $cfToken     = $this->extractOption($args, 'cf-token');
         $cfZoneId    = $this->extractOption($args, 'cf-zone-id');
         $webserver   = $this->extractOption($args, 'webserver') ?? 'nginx';
+        $dryRun      = $this->hasFlag($args, 'dry-run');
 
         if (!$domain && !$all) {
-            $this->fail('Usage: ubxcert renew --domain example.com | --all [--days-before 30] [--webserver openresty|nginx|apache]');
+            $this->fail('Usage: ubxcert renew --domain example.com | --all [--days-before 30] [--webserver openresty|nginx|apache] [--dry-run]');
             return 1;
         }
 
         $domains = $all ? $this->state->listCertDomains() : [$domain];
 
         if (empty($domains)) {
-            $this->out('No managed certificates found.');
+            if ($this->jsonMode) {
+                $this->outputJson([
+                    'status'    => 'ok',
+                    'would_renew' => [],
+                    'would_skip'  => [],
+                    'days_before' => $daysBefore,
+                    'dry_run'    => $dryRun,
+                ]);
+            } else {
+                $this->out('No managed certificates found.');
+            }
             return 0;
+        }
+
+        // --- --dry-run: emit the list of certs that *would* renew without doing it
+        if ($dryRun) {
+            return $this->runDryRun($domains, $daysBefore);
         }
 
         $renewed  = 0;
@@ -89,6 +105,65 @@ class RenewCommand extends BaseCommand
             return 1;
         }
 
+        return 0;
+    }
+
+    /**
+     * Dry-run: enumerate which certs *would* renew under the current
+     * --days-before threshold. JSON-friendly output (`would_renew[]`,
+     * `would_skip[]`) so the panel can preview before scheduling.
+     */
+    private function runDryRun(array $domains, int $daysBefore): int
+    {
+        $wouldRenew = [];
+        $wouldSkip  = [];
+
+        foreach ($domains as $dom) {
+            $expiry = $this->certs->getCertExpiry($dom);
+            $daysLeft = $expiry !== null ? (int)(($expiry - time()) / 86400) : null;
+            $needs    = $this->certs->needsRenewal($dom, $daysBefore);
+
+            $entry = [
+                'domain'   => $dom,
+                'expires'  => $expiry !== null ? gmdate('Y-m-d', $expiry) . ' UTC' : null,
+                'days_left' => $daysLeft,
+                'needs_renewal' => $needs,
+            ];
+
+            if ($needs) {
+                $wouldRenew[] = $entry;
+            } else {
+                $wouldSkip[] = $entry;
+            }
+        }
+
+        if ($this->jsonMode) {
+            $this->outputJson([
+                'status'      => 'ok',
+                'dry_run'     => true,
+                'days_before' => $daysBefore,
+                'would_renew' => $wouldRenew,
+                'would_skip'  => $wouldSkip,
+                'would_renew_count' => count($wouldRenew),
+                'would_skip_count'  => count($wouldSkip),
+            ]);
+            return 0;
+        }
+
+        $this->out('');
+        $this->out("\033[1m  Dry-run: {$daysBefore}-day renewal threshold\033[0m");
+        $this->out('');
+        $this->out("  Would renew (" . count($wouldRenew) . "):");
+        foreach ($wouldRenew as $entry) {
+            $this->out("    \033[33m●\033[0m {$entry['domain']} (expires in {$entry['days_left']}d)");
+        }
+        $this->out('');
+        $this->out("  Would skip (" . count($wouldSkip) . "):");
+        foreach ($wouldSkip as $entry) {
+            $days = $entry['days_left'] ?? '?';
+            $this->out("    \033[32m●\033[0m {$entry['domain']} (expires in {$days}d)");
+        }
+        $this->out('');
         return 0;
     }
 

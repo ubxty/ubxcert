@@ -78,7 +78,9 @@ class Application
         }
 
         if (in_array($commandName, ['version', '--version', '-V'], true)) {
-            $this->printVersion(in_array('--check', $args, true));
+            $jsonMode = in_array('--json', $args, true);
+            $args    = array_values(array_filter($args, fn($a) => $a !== '--json'));
+            $this->printVersion(in_array('--check', $args, true), $jsonMode);
             return 0;
         }
 
@@ -117,12 +119,40 @@ class Application
         }
     }
 
-    private function printVersion(bool $checkRemote = false): void
+    private function printVersion(bool $checkRemote = false, bool $jsonMode = false): void
     {
-        $current = self::VERSION;
+        $current  = self::VERSION;
+        $commit   = $this->detectCommit();
+        $php      = PHP_VERSION;
+        $builtAt  = $this->detectBuildTimestamp();
+
+        if ($jsonMode) {
+            $payload = [
+                'status'      => 'ok',
+                'version'     => $current,
+                'commit'      => $commit,
+                'php_version' => $php,
+                'built_at'    => $builtAt,
+                'update'      => ['checked' => false, 'latest' => null, 'available' => false],
+            ];
+            if ($checkRemote) {
+                $latest = $this->fetchLatestVersion();
+                $payload['update']['checked']   = true;
+                $payload['update']['latest']    = $latest;
+                $payload['update']['available'] = $latest !== null && version_compare($latest, $current, '>');
+            }
+            echo json_encode($payload, JSON_UNESCAPED_SLASHES) . "\n";
+            return;
+        }
+
         echo "ubxcert v{$current}";
 
         if (!$checkRemote) {
+            echo "\n";
+            echo "  PHP {$php}";
+            if ($commit !== null) {
+                echo " · commit {$commit}";
+            }
             echo "\n";
             echo "  Run \033[36mubxcert --version --check\033[0m to check for updates.\n";
             return;
@@ -130,39 +160,7 @@ class Application
 
         echo " — checking for updates...\n";
 
-        $json   = null;
-        $latest = null;
-
-        if (extension_loaded('curl')) {
-            $ch = curl_init('https://api.github.com/repos/ubxty/ubxcert/releases/latest');
-            curl_setopt_array($ch, [
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_TIMEOUT        => 10,
-                CURLOPT_USERAGENT      => 'ubxcert/' . $current,
-                CURLOPT_SSL_VERIFYPEER => true,
-                CURLOPT_SSL_VERIFYHOST => 2,
-            ]);
-            $body = curl_exec($ch);
-            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            curl_close($ch);
-            if ($body !== false && $code === 200) {
-                $json = $body;
-            }
-        } else {
-            $ctx  = stream_context_create(['http' => ['timeout' => 10, 'user_agent' => 'ubxcert/' . $current]]);
-            $body = @file_get_contents('https://api.github.com/repos/ubxty/ubxcert/releases/latest', false, $ctx);
-            if ($body !== false) {
-                $json = $body;
-            }
-        }
-
-        if ($json !== null) {
-            $data = @json_decode($json, true);
-            if (is_array($data) && isset($data['tag_name'])) {
-                $latest = ltrim(trim($data['tag_name']), 'v');
-            }
-        }
+        $latest = $this->fetchLatestVersion();
 
         if ($latest === null) {
             echo "  \033[33mCould not reach GitHub to check for updates.\033[0m\n";
@@ -175,6 +173,80 @@ class Application
         } else {
             echo "  \033[2mYou are up-to-date.\033[0m\n";
         }
+    }
+
+    /** @return string|null Latest version tag (without 'v') or null on failure. */
+    private function fetchLatestVersion(): ?string
+    {
+        $json = null;
+        if (extension_loaded('curl')) {
+            $ch = curl_init('https://api.github.com/repos/ubxty/ubxcert/releases/latest');
+            curl_setopt_array($ch, [
+                CURLOPT_RETURNTRANSFER => true,
+                CURLOPT_FOLLOWLOCATION => true,
+                CURLOPT_TIMEOUT        => 10,
+                CURLOPT_USERAGENT      => 'ubxcert/' . self::VERSION,
+                CURLOPT_SSL_VERIFYPEER => true,
+                CURLOPT_SSL_VERIFYHOST => 2,
+            ]);
+            $body = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($body !== false && $code === 200) {
+                $json = $body;
+            }
+        } else {
+            $ctx  = stream_context_create(['http' => ['timeout' => 10, 'user_agent' => 'ubxcert/' . self::VERSION]]);
+            $body = @file_get_contents('https://api.github.com/repos/ubxty/ubxcert/releases/latest', false, $ctx);
+            if ($body !== false) {
+                $json = $body;
+            }
+        }
+        if ($json === null) {
+            return null;
+        }
+        $data = @json_decode($json, true);
+        if (!is_array($data) || !isset($data['tag_name'])) {
+            return null;
+        }
+        return ltrim(trim($data['tag_name']), 'v');
+    }
+
+    /**
+     * Read the current commit SHA from the local git checkout if available.
+     * Returns null when not run from a git checkout (e.g. PHAR install).
+     */
+    private function detectCommit(): ?string
+    {
+        $gitDir = dirname(__DIR__) . '/.git';
+        if (!is_dir($gitDir)) {
+            return null;
+        }
+        $head = @file_get_contents($gitDir . '/HEAD');
+        if ($head === false) {
+            return null;
+        }
+        $head = trim($head);
+        if (str_starts_with($head, 'ref: ')) {
+            $ref  = trim(substr($head, 5));
+            $file = $gitDir . '/' . $ref;
+            $sha  = @file_get_contents($file);
+            return $sha !== false ? substr(trim($sha), 0, 7) : null;
+        }
+        return substr($head, 0, 7);
+    }
+
+    /**
+     * Build timestamp from git if available, else null.
+     */
+    private function detectBuildTimestamp(): ?string
+    {
+        $gitDir = dirname(__DIR__) . '/.git';
+        if (!is_dir($gitDir)) {
+            return null;
+        }
+        $ts = @shell_exec('git -C ' . escapeshellarg(dirname(__DIR__)) . ' log -1 --format=%cI 2>/dev/null');
+        return $ts !== null ? trim($ts) : null;
     }
 
     private function printHelp(): void

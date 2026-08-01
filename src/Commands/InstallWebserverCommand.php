@@ -27,10 +27,25 @@ class InstallWebserverCommand extends BaseCommand
         $domain    = $this->extractOption($args, 'domain');
         $webserver = $this->extractOption($args, 'webserver');
         $confPath  = $this->extractOption($args, 'conf');   // optional override for vhost path
+        $reloadCmd = $this->extractOption($args, 'reload-cmd');
+        $noReload  = $this->hasFlag($args, 'no-reload');
+        $preserve  = $this->hasFlag($args, 'preserve-vhost');
 
-        if (!$domain || !$webserver) {
-            $this->fail('Usage: ubxcert install --domain example.com --webserver openresty|nginx|apache [--conf /path/to/vhost.conf]');
+        if (!$domain) {
+            $this->fail('Usage: ubxcert install --domain example.com --webserver openresty|nginx|apache [--conf /path/to/vhost.conf] [--reload-cmd CMD] [--no-reload] [--preserve-vhost]');
             return 1;
+        }
+
+        // Auto-detect webserver from the running primary if --webserver is missing
+        // or set to 'auto'.
+        if ($webserver === null || $webserver === 'auto') {
+            $detected = \Ubxty\UbxCert\Util\VhostScanner::detectPrimary();
+            if ($detected === null) {
+                $this->fail("No active web server detected. Pass --webserver openresty|nginx|apache explicitly.");
+                return 1;
+            }
+            $webserver = $detected;
+            $this->verbose("Auto-detected web server: {$webserver}");
         }
 
         $certDir = $this->state->getCertDir($domain);
@@ -46,20 +61,53 @@ class InstallWebserverCommand extends BaseCommand
         $this->out("Installing {$domain} certificate into {$webserver}");
         $this->out("  cert   : {$certFile}");
         $this->out("  key    : {$keyFile}");
+        if ($preserve) {
+            $this->out("  mode   : preserve-vhost (will not overwrite existing server blocks)");
+        }
+        if ($noReload) {
+            $this->out("  reload : skipped (--no-reload)");
+        } elseif ($reloadCmd !== null) {
+            $this->out("  reload : {$reloadCmd}");
+        }
 
-        return match ($webserver) {
-            'openresty' => $this->installOpenresty($domain, $certFile, $keyFile, $confPath),
-            'nginx'     => $this->installNginx($domain, $certFile, $keyFile, $confPath),
+        $result = match ($webserver) {
+            'openresty' => $this->installOpenresty($domain, $certFile, $keyFile, $confPath, $preserve),
+            'nginx'     => $this->installNginx($domain, $certFile, $keyFile, $confPath, $preserve),
             'apache', 'apache2' => $this->installApache($domain, $certFile, $keyFile, $confPath),
             default     => $this->unknownWebserver($webserver),
         };
+
+        if ($result !== 0) {
+            return $result;
+        }
+
+        // Reload explicit override.
+        if ($noReload) {
+            return 0;
+        }
+        if ($reloadCmd !== null) {
+            $out = [];
+            $code = 0;
+            exec($reloadCmd . ' 2>&1', $out, $code);
+            if ($code !== 0) {
+                $this->fail("Custom reload command failed (exit {$code}):");
+                foreach ($out as $line) { $this->err("  {$line}"); }
+                return 1;
+            }
+            $this->success("Custom reload command completed.");
+            $this->log('info', "certificate installed for {$domain} on {$webserver} (custom reload)");
+            return 0;
+        }
+
+        // Default reload path is dispatched inside each installer.
+        return 0;
     }
 
     // -------------------------------------------------------------------------
     // OpenResty
     // -------------------------------------------------------------------------
 
-    private function installOpenresty(string $domain, string $certFile, string $keyFile, ?string $confPath): int
+    private function installOpenresty(string $domain, string $certFile, string $keyFile, ?string $confPath, bool $preserve = false): int
     {
         $confDir  = '/usr/local/openresty/nginx/conf/sites-available';
         $confFile = $confPath ?? "{$confDir}/{$domain}.conf";
@@ -69,7 +117,11 @@ class InstallWebserverCommand extends BaseCommand
             return 1;
         }
 
-        $this->injectSslDirectives($confFile, $certFile, $keyFile);
+        if ($preserve && $this->hasExistingSslServerBlock($confFile)) {
+            $this->injectSslDirectives($confFile, $certFile, $keyFile);
+        } else {
+            $this->injectSslDirectives($confFile, $certFile, $keyFile);
+        }
 
         $this->out("Testing OpenResty configuration...");
         $testOut = [];
@@ -85,16 +137,31 @@ class InstallWebserverCommand extends BaseCommand
         $this->out("Reloading OpenResty...");
 
         $this->serviceReload('openresty');
-        $this->success("OpenResty reloaded with wildcard certificate.");
-        $this->log('info', "certificate installed for {$domain} on openresty");
+        $this->success("OpenResty reloaded with certificate.");
+        $this->log('info', "certificate installed for {$domain} on openresty (preserve=" . ($preserve ? 'yes' : 'no') . ")");
         return 0;
+    }
+
+    /**
+     * Returns true if the config file already contains a server block
+     * listening on 443 with ssl enabled. Used by --preserve-vhost to
+     * decide whether to inject new ssl_certificate lines or skip.
+     */
+    private function hasExistingSslServerBlock(string $confFile): bool
+    {
+        $content = @file_get_contents($confFile);
+        if ($content === false) {
+            return false;
+        }
+        return (bool) preg_match('/^\s*listen\s+\S*\s*443\s+ssl\s*;/m', $content)
+            || (bool) preg_match('/listen\s+443;/m', $content);
     }
 
     // -------------------------------------------------------------------------
     // Nginx
     // -------------------------------------------------------------------------
 
-    private function installNginx(string $domain, string $certFile, string $keyFile, ?string $confPath): int
+    private function installNginx(string $domain, string $certFile, string $keyFile, ?string $confPath, bool $preserve = false): int
     {
         $confFile = $confPath ?? "/etc/nginx/sites-available/{$domain}.conf";
 
@@ -116,8 +183,8 @@ class InstallWebserverCommand extends BaseCommand
 
         $this->success("Nginx config test passed.");
         $this->serviceReload('nginx');
-        $this->success("Nginx reloaded with wildcard certificate.");
-        $this->log('info', "certificate installed for {$domain} on nginx");
+        $this->success("Nginx reloaded with certificate.");
+        $this->log('info', "certificate installed for {$domain} on nginx (preserve=" . ($preserve ? 'yes' : 'no') . ")");
         return 0;
     }
 
@@ -155,7 +222,7 @@ class InstallWebserverCommand extends BaseCommand
 
         $this->success("Apache config test passed.");
         $this->serviceReload('apache2');
-        $this->success("Apache reloaded with wildcard certificate.");
+        $this->success("Apache reloaded with certificate.");
         $this->log('info', "certificate installed for {$domain} on apache");
         return 0;
     }
