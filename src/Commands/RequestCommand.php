@@ -67,7 +67,7 @@ class RequestCommand extends BaseCommand
         $challengeOverride = $this->extractOption($args, 'challenge');
 
         if (!$domainsRaw || !$email) {
-            $this->fail('Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--no-auto] [--staging] [--force] [--json]');
+            $this->emitErrorJson('usage', 'Usage: ubxcert request --domains "*.example.com,example.com" --email admin@example.com [--challenge dns|http] [--no-auto] [--staging] [--force] [--json]');
             return 1;
         }
 
@@ -83,7 +83,7 @@ class RequestCommand extends BaseCommand
             : $this->detectChallenge($domains);
 
         if (!in_array($challenge, [self::CHALLENGE_DNS, self::CHALLENGE_HTTP], true)) {
-            $this->fail("Invalid --challenge value '{$challenge}'. Use 'dns' or 'http'.");
+            $this->emitErrorJson('invalid_challenge', "Invalid --challenge value '{$challenge}'. Use 'dns' or 'http'.");
             return 1;
         }
 
@@ -91,7 +91,7 @@ class RequestCommand extends BaseCommand
         if ($challenge === self::CHALLENGE_HTTP) {
             foreach ($domains as $d) {
                 if (str_starts_with($d, '*.')) {
-                    $this->fail("HTTP-01 does not support wildcards. Found: {$d}. Use --challenge dns (default for wildcards) or omit --challenge.");
+                    $this->emitErrorJson('http01_wildcard_unsupported', "HTTP-01 does not support wildcards. Found: {$d}. Use --challenge dns (default for wildcards) or omit --challenge.");
                     return 1;
                 }
             }
@@ -100,7 +100,7 @@ class RequestCommand extends BaseCommand
         // Surface useless arg combinations early (still harmless if --auto is off,
         // but the user is asking for semantics that don't apply to the chosen path).
         if ($challenge === self::CHALLENGE_DNS && $waitHttpOpt !== null) {
-            $this->fail("--wait-http is not compatible with --challenge dns. Use --wait-dns for wildcard/DNS-01.");
+            $this->emitErrorJson('incompatible_flags', '--wait-http is not compatible with --challenge dns. Use --wait-dns for wildcard/DNS-01.');
             return 1;
         }
 
@@ -116,7 +116,7 @@ class RequestCommand extends BaseCommand
                 // the one the user asked for. Otherwise --force is required.
                 $existingType = $existing['challenge_type'] ?? self::CHALLENGE_DNS;
                 if ($existingType !== $challenge) {
-                    $this->fail("Existing pending order uses '{$existingType}' challenge. Use --force to recreate with '{$challenge}'.");
+                    $this->emitErrorJson('existing_order_mismatch', "Existing pending order uses '{$existingType}' challenge. Use --force to recreate with '{$challenge}'.");
                     return 1;
                 }
                 $this->out("Existing pending order found. Use --force to create a new one.");
@@ -128,7 +128,8 @@ class RequestCommand extends BaseCommand
         try {
             [$jws, $kid, $client] = $this->resolveAccount($email);
         } catch (Throwable $e) {
-            $this->fail("Account setup failed: " . $e->getMessage());
+            $this->log('error', 'account setup failed: ' . $e->getMessage());
+            $this->emitErrorJson('account_setup_failed', 'Account setup failed: ' . $e->getMessage());
             return 1;
         }
 
@@ -138,13 +139,15 @@ class RequestCommand extends BaseCommand
             $order = $client->newOrder($jws, $kid, $domains);
             $this->verbose("Order URL: {$order['order_url']}");
         } catch (Throwable $e) {
-            $this->fail("New order failed: " . $e->getMessage());
+            $this->log('error', 'new order failed: ' . $e->getMessage());
+            $this->emitErrorJson('new_order_failed', 'New order failed: ' . $e->getMessage());
             return 1;
         }
 
         // --- Fetch authorizations and compute challenge values --------------
         $challenges = [];
         $type       = $challenge === self::CHALLENGE_HTTP ? 'http-01' : 'dns-01';
+        $authErrors = [];
 
         foreach ($order['authorizations'] as $authzUrl) {
             try {
@@ -160,8 +163,22 @@ class RequestCommand extends BaseCommand
                 }
 
                 if ($picked === null) {
-                    $this->fail("No {$type} challenge offered for domain: {$domain}");
-                    return 1;
+                    $available = array_map(
+                        fn($c) => $c['type'] ?? 'unknown',
+                        $authz['challenges'] ?? []
+                    );
+                    $msg = "No {$type} challenge offered for domain: {$domain}. Available: " . (empty($available) ? 'none' : implode(', ', $available));
+                    $this->log('error', $msg);
+                    $authErrors[] = [
+                        'domain'       => $domain,
+                        'authz_url'    => $authzUrl,
+                        'error_code'   => 'no_challenge_offered',
+                        'requested'    => $type,
+                        'available'    => $available,
+                    ];
+                    // Don't bail immediately — let the loop continue so all
+                    // authz errors are surfaced in the JSON payload.
+                    continue;
                 }
 
                 $challenges[] = $this->buildChallengeRecord(
@@ -175,16 +192,32 @@ class RequestCommand extends BaseCommand
 
                 $this->verbose("Challenge for {$domain}: type={$type}");
             } catch (Throwable $e) {
-                $this->fail("Authorization fetch failed: " . $e->getMessage());
+                $this->log('error', 'authorization fetch failed: ' . $e->getMessage());
+                $this->emitErrorJson('authorization_fetch_failed', 'Authorization fetch failed: ' . $e->getMessage(), [
+                    'partial_challenges' => $challenges,
+                    'auth_errors'        => $authErrors,
+                ]);
                 return 1;
             }
+        }
+
+        // If we collected zero challenges, every domain either errored or
+        // had no compatible challenge type. Emit a structured failure so the
+        // panel can distinguish "ACME offered nothing" from "no order at all".
+        if (empty($challenges)) {
+            $this->emitErrorJson('no_challenge_offered', 'No compatible ACME challenge could be obtained for any domain.', [
+                'auth_errors' => $authErrors,
+                'attempted'   => $type,
+            ]);
+            return 1;
         }
 
         // --- Generate the certificate private key and save state ------------
         try {
             $this->certs->generateCertKey($baseDomain);
         } catch (Throwable $e) {
-            $this->fail("Certificate key generation failed: " . $e->getMessage());
+            $this->log('error', 'certificate key generation failed: ' . $e->getMessage());
+            $this->emitErrorJson('cert_key_generation_failed', 'Certificate key generation failed: ' . $e->getMessage());
             return 1;
         }
 
@@ -377,6 +410,7 @@ class RequestCommand extends BaseCommand
                 $payload = $this->buildChallengeOutput($state) + $chainResult;
                 $payload['auto_chain'] = $chainResult;
                 $payload['domain']     = $baseDomain;
+                $payload['status']     = 'awaiting-challenge';
                 $payload['next_step']  = "ubxcert complete --domain {$baseDomain} --wait-dns {$waitDns}" . ($state['staging'] ? ' --staging' : '');
                 $this->outputJson($payload);
             }
@@ -409,6 +443,9 @@ class RequestCommand extends BaseCommand
                 $payload = $this->buildChallengeOutput($state) + $chainResult;
                 $payload['auto_chain'] = $chainResult;
                 $payload['domain']     = $baseDomain;
+                $payload['status']     = 'auto-chain-failed';
+                $payload['error_code'] = 'complete_failed';
+                $payload['error']      = "Auto-chain stopped at 'complete' (exit {$code}).";
                 $this->outputJson($payload);
             }
             return $code;
@@ -436,6 +473,9 @@ class RequestCommand extends BaseCommand
                 $payload = $this->buildChallengeOutput($state) + $chainResult;
                 $payload['auto_chain'] = $chainResult;
                 $payload['domain']     = $baseDomain;
+                $payload['status']     = 'auto-chain-partial';
+                $payload['error_code'] = 'no_webserver_detected';
+                $payload['error']      = "Cert issued and saved for {$baseDomain}, but no active web server was detected.";
                 $this->outputJson($payload);
             }
             return 0;
@@ -474,6 +514,9 @@ class RequestCommand extends BaseCommand
                 $payload = $this->buildChallengeOutput($state) + $chainResult;
                 $payload['auto_chain'] = $chainResult;
                 $payload['domain']     = $baseDomain;
+                $payload['status']     = 'auto-chain-failed';
+                $payload['error_code'] = 'install_failed';
+                $payload['error']      = "Auto-chain install step failed (exit {$code}).";
                 $this->outputJson($payload);
             }
             return $code;
@@ -489,6 +532,7 @@ class RequestCommand extends BaseCommand
             $payload = $this->buildChallengeOutput($state) + $chainResult;
             $payload['auto_chain'] = $chainResult;
             $payload['domain']     = $baseDomain;
+            $payload['status']     = 'auto-chain-complete';
             // In --auto --json mode, the chain IS the next step; suppress
             // the original "complete ..." command string.
             unset($payload['next_step']);
@@ -565,7 +609,9 @@ class RequestCommand extends BaseCommand
     private function outputChallenges(array $state): int
     {
         if ($this->jsonMode) {
-            $this->outputJson($this->buildChallengeOutput($state));
+            $payload = $this->buildChallengeOutput($state);
+            $payload['status'] = 'ready';
+            $this->outputJson($payload);
             return 0;
         }
 

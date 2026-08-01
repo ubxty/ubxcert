@@ -49,11 +49,16 @@ abstract class BaseCommand
     // Output helpers
     // -------------------------------------------------------------------------
 
+    /** Captured human output so it can be embedded in the final JSON document. */
+    protected array $jsonMessages = [];
+
     protected function out(string $msg): void
     {
-        if (!$this->jsonMode) {
-            echo $msg . "\n";
+        if ($this->jsonMode) {
+            $this->jsonMessages[] = ['level' => 'info', 'message' => $msg];
+            return;
         }
+        echo $msg . "\n";
     }
 
     protected function err(string $msg): void
@@ -63,29 +68,85 @@ abstract class BaseCommand
 
     protected function verbose(string $msg): void
     {
-        if ($this->verbose && !$this->jsonMode) {
-            echo "  {$msg}\n";
+        if (!$this->verbose) {
+            return;
         }
+        if ($this->jsonMode) {
+            $this->jsonMessages[] = ['level' => 'verbose', 'message' => $msg];
+            return;
+        }
+        echo "  {$msg}\n";
     }
 
     protected function success(string $msg): void
     {
+        if ($this->jsonMode) {
+            $this->jsonMessages[] = ['level' => 'success', 'message' => $msg];
+            return;
+        }
         $this->out("\033[32m✓ {$msg}\033[0m");
     }
 
     protected function warn(string $msg): void
     {
+        if ($this->jsonMode) {
+            $this->jsonMessages[] = ['level' => 'warn', 'message' => $msg];
+            return;
+        }
         $this->out("\033[33m⚠ {$msg}\033[0m");
     }
 
     protected function fail(string $msg): void
     {
+        if ($this->jsonMode) {
+            $this->jsonMessages[] = ['level' => 'error', 'message' => $msg];
+            return;
+        }
         $this->err("\033[31m✗ {$msg}\033[0m");
     }
 
+    /**
+     * Emit a single JSON document to stdout. In --json mode we guarantee
+     * exactly one well-formed JSON object per invocation so that panel
+     * wrappers can `$(...)` the output and `json.load` it without
+     * stripping prose lines.
+     */
     protected function outputJson(array $data): void
     {
-        echo json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+        if ($this->jsonMode) {
+            if (!array_key_exists('status', $data)) {
+                $data['status'] = 'ok';
+            }
+            if (!array_key_exists('challenges', $data)) {
+                // Always include `challenges` so consumers can do
+                // `payload.get('challenges', [])` without a KeyError.
+                $data['challenges'] = [];
+            }
+            if (!array_key_exists('messages', $data) && $this->jsonMessages) {
+                $data['messages'] = $this->jsonMessages;
+            }
+        }
+        echo json_encode($data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
+    }
+
+    /**
+     * Emit a structured failure JSON document. Always returns a single
+     * JSON object on stdout (in --json mode) with status='error' and a
+     * stable `error_code`. Keeps any partial `challenges` and the
+     * captured messages so the panel can debug without losing context.
+     *
+     * @param array<string, mixed> $extra  Additional fields to merge into
+     *                                     the payload (e.g. auth_errors).
+     */
+    protected function emitErrorJson(string $errorCode, string $message, array $extra = []): void
+    {
+        if (!$this->jsonMode) {
+            $this->fail($message);
+            return;
+        }
+
+        $payload = ['status' => 'error', 'error_code' => $errorCode, 'error' => $message] + $extra;
+        $this->outputJson($payload);
     }
 
     // -------------------------------------------------------------------------
