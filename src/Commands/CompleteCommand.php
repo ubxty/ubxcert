@@ -113,68 +113,68 @@ class CompleteCommand extends BaseCommand
         if ($isHttp) {
             if ($waitHttp > 0) {
                 $this->out("Waiting up to {$waitHttp}s for HTTP-01 challenge file to be served...");
-                foreach ($state['challenges'] as &$challenge) {
-                    if (($challenge['status'] ?? '') === 'valid') {
+                foreach ($state['challenges'] as $ch) {
+                    if (($ch['status'] ?? '') === 'valid') {
                         continue;
                     }
                     $ok = $this->waitForHttp(
-                        $challenge['http_url'] ?? '',
-                        $challenge['key_authorization'] ?? '',
+                        $ch['http_url'] ?? '',
+                        $ch['key_authorization'] ?? '',
                         $waitHttp
                     );
                     if (!$ok) {
-                        $this->fail("HTTP-01 challenge file not reachable after {$waitHttp}s at {$challenge['http_url']}");
-                        $this->fail("Expected body : {$challenge['key_authorization']}");
+                        $this->fail("HTTP-01 challenge file not reachable after {$waitHttp}s at {$ch['http_url']}");
+                        $this->fail("Expected body : {$ch['key_authorization']}");
                         $this->fail("Serve the file at /.well-known/acme-challenge/<token> on the domain (port 80) and retry.");
                         return 1;
                     }
-                    $this->success("HTTP-01 reachable for {$challenge['domain']}");
+                    $this->success("HTTP-01 reachable for {$ch['domain']}");
                 }
-                unset($challenge);
+                unset($ch);
             } else {
                 $this->verbose("Skipping HTTP-01 pre-check (no --wait-http given). ACME will validate on trigger.");
             }
         } else {
             if ($waitDns > 0) {
                 $this->out("Waiting up to {$waitDns}s for DNS propagation...");
-                foreach ($state['challenges'] as &$challenge) {
-                    if (($challenge['status'] ?? '') === 'valid') {
+                foreach ($state['challenges'] as $ch) {
+                    if (($ch['status'] ?? '') === 'valid') {
                         continue;
                     }
                     $ok = $this->waitForDns(
-                        $challenge['challenge_host'],
-                        $challenge['txt_value'],
+                        $ch['challenge_host'],
+                        $ch['txt_value'],
                         $waitDns
                     );
                     if (!$ok) {
-                        $this->fail("DNS TXT record not visible after {$waitDns}s for {$challenge['challenge_host']}");
-                        $this->fail("Expected value: {$challenge['txt_value']}");
+                        $this->fail("DNS TXT record not visible after {$waitDns}s for {$ch['challenge_host']}");
+                        $this->fail("Expected value: {$ch['txt_value']}");
                         $this->fail("Add the TXT record and retry.");
                         return 1;
                     }
-                    $this->success("DNS verified for {$challenge['domain']}");
+                    $this->success("DNS verified for {$ch['domain']}");
                 }
-                unset($challenge);
+                unset($ch);
             }
         }
 
         // --- Trigger challenges that are still pending ----------------------
-        foreach ($state['challenges'] as &$challenge) {
-            if (($challenge['status'] ?? '') === 'valid') {
-                $this->verbose("Challenge already valid for {$challenge['domain']}, skipping.");
+        foreach ($state['challenges'] as &$ch) {
+            if (($ch['status'] ?? '') === 'valid') {
+                $this->verbose("Challenge already valid for {$ch['domain']}, skipping.");
                 continue;
             }
             try {
-                $this->verbose("Triggering challenge for {$challenge['domain']}...");
-                $result = $client->triggerChallenge($accountJws, $kid, $challenge['challenge_url']);
-                $challenge['status'] = $result['status'] ?? 'processing';
-                $this->verbose("Challenge status: {$challenge['status']}");
+                $this->verbose("Triggering challenge for {$ch['domain']}...");
+                $result = $client->triggerChallenge($accountJws, $kid, $ch['challenge_url']);
+                $ch['status'] = $result['status'] ?? 'processing';
+                $this->verbose("Challenge status: {$ch['status']}");
             } catch (Throwable $e) {
-                $this->fail("Failed to trigger challenge for {$challenge['domain']}: " . $e->getMessage());
+                $this->fail("Failed to trigger challenge for {$ch['domain']}: " . $e->getMessage());
                 return 1;
             }
         }
-        unset($challenge);
+        unset($ch);
 
         // --- Poll order until 'ready' (all challenges valid) ----------------
         $this->out('Polling for authorization...');

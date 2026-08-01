@@ -29,7 +29,7 @@ use Ubxty\UbxCert\Commands\WizardCommand;
  */
 class Application
 {
-    private const VERSION = '1.3.0';
+    private const VERSION = '1.3.1';
 
     /** Expose version so SelfUpdateCommand can read it at runtime. */
     public static function getVersion(): string

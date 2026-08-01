@@ -257,6 +257,36 @@ check(
     'staging=' . var_export($sp->getValue($noStagingCmd), true)
 );
 
+// --- 9. CompleteCommand must never leave $challenge undefined after the
+// HTTP-01 / DNS-01 poll loops. The old code used `foreach (… as &$challenge)`
+// inside the loops, which clobbered the outer $challenge (set on line 87
+// from `$stateChallenge`) once `unset($challenge)` ran. The success path
+// then printed `Warning: Undefined variable $challenge` on stdout, which
+// poisoned the JSON document and made the panel's `json.load` choke.
+//
+// Fix: the loops now bind to `$ch` so the outer `$challenge` survives.
+$completeSrc = file_get_contents(__DIR__ . '/../src/Commands/CompleteCommand.php');
+check(
+    'CompleteCommand does not bind foreach as &$challenge',
+    !str_contains($completeSrc, 'foreach ($state[\'challenges\'] as &$challenge)'),
+    'found `&$challenge` reference — leaks into outer scope and steals the variable'
+);
+check(
+    'CompleteCommand does not unset($challenge) outside a loop var',
+    !preg_match('/unset\(\$challenge\)/', $completeSrc),
+    'found unset($challenge) — would destroy the outer $challenge'
+);
+check(
+    'CompleteCommand retains $challenge = $stateChallenge on success path',
+    str_contains($completeSrc, '$challenge = $stateChallenge;'),
+    'lost the $stateChallenge reboot'
+);
+check(
+    'CompleteCommand emits challenge_type in JSON output',
+    str_contains($completeSrc, "'challenge_type'   => \$challenge"),
+    'JSON output still references $challenge'
+);
+
 if ($failures) {
     echo "\nFAILED: " . count($failures) . " check(s)\n";
     exit(1);
