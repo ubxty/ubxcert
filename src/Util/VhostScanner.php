@@ -303,6 +303,54 @@ class VhostScanner
         return null;
     }
 
+    /**
+     * Per-domain vhost inspection — returns the matched SSL-enabled vhost's
+     * wiring details so the panel can show the operator that the cert is
+     * actually pointing at the right file on the right listener with the
+     * right HSTS / HTTP/2 / ACME-fallback configuration.
+     *
+     * Shape returned (or null if no SSL vhost matches the domain):
+     *   [
+     *     'webserver'                       => string,
+     *     'path'                            => string,  // vhost file
+     *     'listens_on_443'                  => bool,
+     *     'ssl_certificate_directive'       => ?string,
+     *     'ssl_certificate_key_directive'   => ?string,
+     *     'ssl_protocols'                   => ?string,
+     *     'http2_enabled'                   => bool,
+     *     'hsts_header'                     => ?string, // raw add_header / Header ... line
+     *     'wellknown_handler'               => string,  // lua-resty-acme | static-alias | none
+     *   ]
+     */
+    public static function domainSslWebserverDetails(string $domain): ?array
+    {
+        $domain = strtolower(trim($domain));
+        if ($domain === '') {
+            return null;
+        }
+
+        foreach (self::listAllSites() as $site) {
+            if (strtolower((string) ($site['domain'] ?? '')) !== $domain) {
+                continue;
+            }
+            if (empty($site['ssl'])) {
+                continue;
+            }
+            return [
+                'webserver'                     => $site['webserver'] ?? 'unknown',
+                'path'                          => $site['config_path'] ?? null,
+                'listens_on_443'                => (bool) ($site['listens_on_443'] ?? false),
+                'ssl_certificate_directive'     => $site['ssl_cert'] ?? null,
+                'ssl_certificate_key_directive' => $site['ssl_key'] ?? null,
+                'ssl_protocols'                 => $site['ssl_protocols'] ?? null,
+                'http2_enabled'                 => (bool) ($site['http2_enabled'] ?? false),
+                'hsts_header'                   => $site['hsts_header'] ?? null,
+                'wellknown_handler'             => $site['wellknown_handler'] ?? 'none',
+            ];
+        }
+        return null;
+    }
+
     // -------------------------------------------------------------------------
     // Docroot resolution (used by WebrootChallenger)
     // -------------------------------------------------------------------------
@@ -390,6 +438,34 @@ class VhostScanner
             preg_match('/\bssl_certificate\s+([^;]+);/', $block, $cm);
             $sslCert = isset($cm[1]) ? trim($cm[1]) : null;
 
+            preg_match('/\bssl_certificate_key\s+([^;]+);/', $block, $ckm);
+            $sslKey = isset($ckm[1]) ? trim($ckm[1]) : null;
+
+            preg_match('/\bssl_protocols\s+([^;]+);/i', $block, $spm);
+            $sslProtocols = isset($spm[1]) ? trim($spm[1]) : null;
+
+            // listen 443 ssl; OR listen 443 ssl http2; — capture the listen line
+            // so http2 detection is reliable across both syntaxes.
+            $listens443 = (bool) preg_match('/\blisten\s+[^;]*\b443\b/i', $block);
+            $http2On    = (bool) preg_match('/^\s*http2\s+on\s*;/im', $block);
+            $http2Listen = (bool) preg_match('/\blisten\s+[^;]*\bhttp2\b/i', $block);
+            $http2Enabled = $http2On || $http2Listen;
+
+            preg_match('/^\s*add_header\s+Strict-Transport-Security\s+([^;]+);/im', $block, $hstsm);
+            $hstsHeader = isset($hstsm[1]) ? trim($hstsm[1]) : null;
+
+            // Detect the panel's ACME-fallback handler. Two shapes:
+            //   1. lua-resty-acme: `location = /.well-known/acme-challenge/ { ... }`
+            //      inside a server block, typically with content_by_lua_block.
+            //   2. Static alias:   `location ^~ /.well-known/acme-challenge/ { alias ...; }`
+            //      or `location /.well-known/acme-challenge/ { root ...; }`
+            $wellknown = 'none';
+            if (preg_match('/location\s+[~^=]*\s*\/\.well-known\/acme-challenge\/?[^\{]*\{[^}]*content_by_lua_block/im', $block)) {
+                $wellknown = 'lua-resty-acme';
+            } elseif (preg_match('/location\s+[~^=]*\s*\/\.well-known\/acme-challenge\/?[^\{]*\{/im', $block)) {
+                $wellknown = 'static-alias';
+            }
+
             // `root /var/www/...;` — may be unquoted, single- or double-quoted.
             // Take the LAST occurrence in the block so that location-level
             // overrides win over the server-level default.
@@ -412,12 +488,18 @@ class VhostScanner
                     continue;
                 }
                 $sites[] = [
-                    'domain'      => $name,
-                    'config'      => basename($file),
-                    'config_path' => $file,
-                    'ssl'         => $hasSsl,
-                    'ssl_cert'    => $sslCert,
-                    'docroot'     => $docroot,
+                    'domain'            => $name,
+                    'config'            => basename($file),
+                    'config_path'       => $file,
+                    'ssl'               => $hasSsl,
+                    'ssl_cert'          => $sslCert,
+                    'ssl_key'           => $sslKey,
+                    'ssl_protocols'     => $sslProtocols,
+                    'listens_on_443'    => $listens443,
+                    'http2_enabled'     => $http2Enabled,
+                    'hsts_header'       => $hstsHeader,
+                    'wellknown_handler' => $wellknown,
+                    'docroot'           => $docroot,
                 ];
             }
         }
@@ -484,32 +566,57 @@ class VhostScanner
             preg_match('/\bSSLCertificateFile\s+(\S+)/i', $block, $cm);
             $sslCert = isset($cm[1]) ? trim($cm[1]) : null;
 
+            preg_match('/\bSSLCertificateKeyFile\s+(\S+)/i', $block, $ckm);
+            $sslKey = isset($ckm[1]) ? trim($ckm[1]) : null;
+
+            preg_match('/\bSSLProtocol\s+([^\n]+)/i', $block, $spm);
+            $sslProtocols = isset($spm[1]) ? trim($spm[1]) : null;
+
+            preg_match('/<VirtualHost[^>]*(\b443\b)[^>]*>/i', $block, $lp);
+            $listens443 = isset($lp[1]);
+
+            // Protocols h2 http/1.1 (Apache 2.4.26+ for HTTP/2)
+            preg_match('/^\s*Protocols\s+([^\n]+)/im', $block, $h2m);
+            $http2Enabled = false;
+            if (isset($h2m[1])) {
+                $http2Enabled = (bool) preg_match('/\bh2\b/i', $h2m[1]);
+            }
+
+            preg_match('/^\s*Header\s+(?:always\s+)?set\s+Strict-Transport-Security\s+"([^"]+)"/im', $block, $hstsm);
+            $hstsHeader = isset($hstsm[1]) ? trim($hstsm[1]) : null;
+
+            // Apache static-alias for ACME challenges
+            $wellknown = 'none';
+            if (preg_match('/<Location\s+[\^~=]*\/\.well-known\/acme-challenge\/?[^>]*>/i', $block)) {
+                $wellknown = 'static-alias';
+            }
+
             // DocumentRoot may be quoted or unquoted
             $docroot = null;
             if (preg_match('/^\s*DocumentRoot\s+("[^"]+"|\x27[^\x27]+\x27|\S+)/mi', $block, $drm)) {
                 $docroot = trim((string) $drm[1], "\"' \t");
             }
 
-            $sites[] = [
-                'domain'      => trim($snm[1]),
-                'config'      => basename($file),
-                'config_path' => $file,
-                'ssl'         => $hasSsl,
-                'ssl_cert'    => $sslCert,
-                'docroot'     => $docroot,
+            $entry = [
+                'config'            => basename($file),
+                'config_path'       => $file,
+                'ssl'               => $hasSsl,
+                'ssl_cert'          => $sslCert,
+                'ssl_key'           => $sslKey,
+                'ssl_protocols'     => $sslProtocols,
+                'listens_on_443'    => $listens443,
+                'http2_enabled'     => $http2Enabled,
+                'hsts_header'       => $hstsHeader,
+                'wellknown_handler' => $wellknown,
+                'docroot'           => $docroot,
             ];
+
+            $sites[] = array_merge(['domain' => trim($snm[1])], $entry);
 
             preg_match_all('/^\s*ServerAlias\s+(.+)/mi', $block, $am);
             foreach ($am[1] ?? [] as $line) {
                 foreach (array_filter(preg_split('/\s+/', trim($line))) as $alias) {
-                    $sites[] = [
-                        'domain'      => $alias,
-                        'config'      => basename($file),
-                        'config_path' => $file,
-                        'ssl'         => $hasSsl,
-                        'ssl_cert'    => $sslCert,
-                        'docroot'     => $docroot,
-                    ];
+                    $sites[] = array_merge(['domain' => $alias], $entry);
                 }
             }
         }
@@ -564,6 +671,35 @@ class VhostScanner
                 preg_match('/\broot\s+\*?\s+("[^"]+"|\x27[^\x27]+\x27|\S+)/i', $block, $rm);
                 $docroot = isset($rm[1]) ? trim($rm[1], "\"' \t") : null;
 
+                // Caddy 2 tls directive: `tls cert_file key_file` — first arg
+                // after `tls` is the cert path. `tls internal` and `tls off`
+                // have no path. `tls <email>` (ACME flow) also has no path.
+                $sslCert = null;
+                $sslKey  = null;
+                if (preg_match('/^\s*tls\s+(?!internal\b|off\b|email\b)([^\s]+)\s+([^\s]+)/im', $block, $tm)) {
+                    $sslCert = $tm[1] ?? null;
+                    $sslKey  = $tm[2] ?? null;
+                }
+
+                // Caddy's `protocols` directive is global, but per-site overrides exist:
+                //   protocols h1 h2 h3
+                preg_match('/^\s*protocols\s+([^\n]+)/im', $block, $prm);
+                $sslProtocols = isset($prm[1]) ? trim($prm[1]) : null;
+
+                // Caddy enables HTTP/2 by default for HTTPS; explicit disable is rare.
+                $http2Enabled = true; // default-on assumption; Caddy doesn't typically
+                                      // surface this in vhost text unless disabled.
+
+                preg_match('/^\s*header\s+Strict-Transport-Security\s+"([^"]+)"/im', $block, $hstsm);
+                $hstsHeader = isset($hstsm[1]) ? trim($hstsm[1]) : null;
+
+                // Caddy ACME challenge handling is built-in via the `tls` directive;
+                // no explicit `/.well-known` location block is required. Report as
+                // built-in so the operator knows the fallback is wired.
+                $wellknown = $hasSsl ? 'caddy-builtin' : 'none';
+
+                $listens443 = $hasSsl; // Caddy auto-listens on 443 when tls is configured
+
                 // Split label into individual hostnames if comma/space-separated.
                 foreach (preg_split('/[\s,]+/', $domain) ?: [] as $name) {
                     $name = trim($name);
@@ -571,12 +707,18 @@ class VhostScanner
                         continue;
                     }
                     $sites[] = [
-                        'domain'      => $name,
-                        'config'      => basename($file),
-                        'config_path' => $file,
-                        'ssl'         => $hasSsl,
-                        'ssl_cert'    => null,
-                        'docroot'     => $docroot,
+                        'domain'            => $name,
+                        'config'            => basename($file),
+                        'config_path'       => $file,
+                        'ssl'               => $hasSsl,
+                        'ssl_cert'          => $sslCert,
+                        'ssl_key'           => $sslKey,
+                        'ssl_protocols'     => $sslProtocols,
+                        'listens_on_443'    => $listens443,
+                        'http2_enabled'     => $http2Enabled,
+                        'hsts_header'       => $hstsHeader,
+                        'wellknown_handler' => $wellknown,
+                        'docroot'           => $docroot,
                     ];
                 }
                 continue;

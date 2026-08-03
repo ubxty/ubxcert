@@ -102,10 +102,26 @@ class ListCommand extends BaseCommand
                 $certDir  = $this->state->getCertDir($domain);
 
                 $certPath    = $certDir . '/cert.pem';
-                [, $sans, $wildcard] = $this->readCertInfo($certPath);
+                $certInfo    = $this->readCertInfo($certPath);
+                $sans        = $certInfo['sans'];
+                $wildcard    = $certInfo['wildcard'];
                 $installedOn = VhostScanner::domainSslWebserver($domain);
+                $vhost       = VhostScanner::domainSslWebserverDetails($domain);
 
-                $rows[]        = $this->buildRow($domain, 'ubxcert', $certDir, $expiry, $daysLeft, $renewal, $order['order_status'] ?? 'valid', $sans, $wildcard, $installedOn);
+                $rows[]        = $this->buildRow(
+                    $domain,
+                    'ubxcert',
+                    $certDir,
+                    $expiry,
+                    $daysLeft,
+                    $renewal,
+                    $order['order_status'] ?? 'valid',
+                    $sans,
+                    $wildcard,
+                    $installedOn,
+                    $certInfo,
+                    $vhost
+                );
                 $seen[$domain] = true;
             }
         }
@@ -134,15 +150,31 @@ class ListCommand extends BaseCommand
                     continue;
                 }
 
-                [$expiry, $sans] = $this->readCertInfo($certPath);
-                $daysLeft = $expiry !== null ? (int)(($expiry - time()) / 86400) : null;
-                $renewal  = $daysLeft !== null && $daysLeft < 30;
-                $certDir  = dirname($certPath);
+                $certInfo    = $this->readCertInfo($certPath);
+                $expiry      = $certInfo['expiry'];
+                $sans        = $certInfo['sans'];
+                $daysLeft    = $expiry !== null ? (int)(($expiry - time()) / 86400) : null;
+                $renewal     = $daysLeft !== null && $daysLeft < 30;
+                $certDir     = dirname($certPath);
 
                 $isWildcard  = $this->isWildcardCert($sans);
                 $installedOn = VhostScanner::domainSslWebserver($domain);
+                $vhost       = VhostScanner::domainSslWebserverDetails($domain);
 
-                $rows[]        = $this->buildRow($domain, 'certbot', $certDir, $expiry, $daysLeft, $renewal, 'valid', $sans, $isWildcard, $installedOn);
+                $rows[]        = $this->buildRow(
+                    $domain,
+                    'certbot',
+                    $certDir,
+                    $expiry,
+                    $daysLeft,
+                    $renewal,
+                    'valid',
+                    $sans,
+                    $isWildcard,
+                    $installedOn,
+                    $certInfo,
+                    $vhost
+                );
                 $seen[$domain] = true;
             }
         }
@@ -150,23 +182,58 @@ class ListCommand extends BaseCommand
         return $rows;
     }
 
-    /** @return array{0: int|null, 1: string[], 2: bool} */
+    /**
+     * Read every X.509 field the panel needs to surface to the operator.
+     *
+     * Returns an associative array so adding fields doesn't break tuple
+     * destructuring at call sites. Legacy positional shape (expiry, sans,
+     * wildcard) is preserved as the first three keys.
+     *
+     * @return array{
+     *   expiry: ?int,
+     *   valid_from: ?int,
+     *   sans: string[],
+     *   wildcard: bool,
+     *   issuer: ?string,
+     *   subject: ?string,
+     *   serial: ?string,
+     *   signature_algorithm: ?string,
+     *   key_algorithm: ?string,
+     *   key_size: ?int,
+     *   fingerprint_sha256: ?string,
+     * }
+     */
     private function readCertInfo(string $certPath): array
     {
+        $empty = [
+            'expiry'               => null,
+            'valid_from'           => null,
+            'sans'                 => [],
+            'wildcard'             => false,
+            'issuer'               => null,
+            'subject'              => null,
+            'serial'               => null,
+            'signature_algorithm'  => null,
+            'key_algorithm'        => null,
+            'key_size'             => null,
+            'fingerprint_sha256'   => null,
+        ];
+
         $pem = @file_get_contents($certPath);
         if ($pem === false) {
-            return [null, [], false];
+            return $empty;
         }
 
         $cert = @openssl_x509_read($pem);
         if ($cert === false) {
-            return [null, [], false];
+            return $empty;
         }
 
-        $info   = openssl_x509_parse($cert);
-        $expiry = $info['validTo_time_t'] ?? null;
+        $info      = openssl_x509_parse($cert);
+        $expiry    = $info['validTo_time_t']   ?? null;
+        $validFrom = $info['validFrom_time_t'] ?? null;
 
-        // Extract SANs from extensions
+        // Extract SANs from extensions.subjectAltName — comma-separated `DNS:` labels.
         $sans = [];
         $ext  = $info['extensions']['subjectAltName'] ?? '';
         foreach (explode(',', $ext) as $part) {
@@ -176,7 +243,108 @@ class ListCommand extends BaseCommand
             }
         }
 
-        return [$expiry, $sans, $this->isWildcardCert($sans)];
+        // Subject & issuer — openssl_x509_parse returns name arrays.
+        // Render to RFC 4514 string form so the panel can show "CN=…, O=…".
+        $issuer  = $this->renderX509Name($info['issuer']  ?? []);
+        $subject = $this->renderX509Name($info['subject'] ?? []);
+
+        // Serial number — openssl_x509_parse returns it as a hex string.
+        $serial = isset($info['serialNumber']) ? strtoupper((string) $info['serialNumber']) : null;
+
+        // Signature algorithm — prefer Short Name (e.g. `sha256WithRSAEncryption`),
+        // fall back to Long Name.
+        $signatureAlgorithm = $info['signatureTypeSN']
+            ?? ($info['signatureTypeLN'] ?? null);
+
+        // Public key — type + size. openssl_x509_parse does NOT return these
+        // directly; pull them out of the parsed public-key resource.
+        $keyAlgorithm = null;
+        $keySize      = null;
+        $pkey = @openssl_pkey_get_public($cert);
+        if ($pkey !== false) {
+            $details = openssl_pkey_get_details($pkey);
+            if (is_array($details)) {
+                $typeMap = [
+                    OPENSSL_KEYTYPE_RSA => 'RSA',
+                    OPENSSL_KEYTYPE_DSA => 'DSA',
+                    OPENSSL_KEYTYPE_DH  => 'DH',
+                    OPENSSL_KEYTYPE_EC  => 'EC',
+                ];
+                $keyAlgorithm = $typeMap[$details['type'] ?? -1] ?? null;
+                $keySize      = isset($details['bits']) ? (int) $details['bits'] : null;
+            }
+        }
+
+        // SHA-256 fingerprint — decode the PEM body to DER and hash it.
+        // Avoids depending on the openssl binary being on PATH.
+        $fingerprint = $this->sha256FingerprintFromPem($pem);
+
+        return [
+            'expiry'              => $expiry,
+            'valid_from'          => $validFrom,
+            'sans'                => $sans,
+            'wildcard'            => $this->isWildcardCert($sans),
+            'issuer'              => $issuer,
+            'subject'             => $subject,
+            'serial'              => $serial,
+            'signature_algorithm' => $signatureAlgorithm,
+            'key_algorithm'       => $keyAlgorithm,
+            'key_size'            => $keySize,
+            'fingerprint_sha256'  => $fingerprint,
+        ];
+    }
+
+    /**
+     * Render an X.509 name array (issuer/subject from openssl_x509_parse)
+     * as an RFC 4514–style string for the panel.
+     *
+     * @param array<string, string> $name
+     */
+    private function renderX509Name(array $name): ?string
+    {
+        if ($name === []) {
+            return null;
+        }
+        $parts = [];
+        // Order RDNs from most-specific to least: CN, then O, OU, L, ST, C.
+        foreach (['CN', 'O', 'OU', 'L', 'ST', 'C', 'E'] as $rdn) {
+            if (isset($name[$rdn]) && $name[$rdn] !== '') {
+                $parts[] = $rdn . '=' . $name[$rdn];
+            }
+        }
+        return $parts === [] ? null : implode(', ', $parts);
+    }
+
+    /**
+     * Compute the SHA-256 fingerprint of a PEM-encoded X.509 certificate
+     * (uppercase hex, colon-separated, matching `openssl x509 -fingerprint -sha256`).
+     * Returns null if the body cannot be decoded.
+     */
+    private function sha256FingerprintFromPem(string $pem): ?string
+    {
+        $body = '';
+        $inBody = false;
+        foreach (preg_split('/\r?\n/', $pem) ?: [] as $line) {
+            $line = rtrim($line);
+            if (str_starts_with($line, '-----BEGIN')) {
+                $inBody = true;
+                continue;
+            }
+            if (str_starts_with($line, '-----END')) {
+                break;
+            }
+            if ($inBody && $line !== '') {
+                $body .= $line;
+            }
+        }
+        $der = base64_decode($body, true);
+        if ($der === false || $der === '') {
+            return null;
+        }
+        $hex = hash('sha256', $der);
+        // Format as `AA:BB:CC:…` so it matches the openssl CLI fingerprint form.
+        $pairs = str_split($hex, 2);
+        return strtoupper(implode(':', $pairs));
     }
 
     /** @param string[] $sans */
@@ -190,7 +358,22 @@ class ListCommand extends BaseCommand
         return false;
     }
 
-    /** @param string[] $sans */
+    /**
+     * @param array{
+     *   expiry: ?int,
+     *   valid_from: ?int,
+     *   sans: string[],
+     *   wildcard: bool,
+     *   issuer: ?string,
+     *   subject: ?string,
+     *   serial: ?string,
+     *   signature_algorithm: ?string,
+     *   key_algorithm: ?string,
+     *   key_size: ?int,
+     *   fingerprint_sha256: ?string,
+     * } $certInfo
+     * @param string[] $sans
+     */
     private function buildRow(
         string  $domain,
         string  $source,
@@ -201,19 +384,36 @@ class ListCommand extends BaseCommand
         string  $status,
         array   $sans        = [],
         bool    $wildcard    = false,
-        ?string $installedOn = null
+        ?string $installedOn = null,
+        array   $certInfo    = [],
+        ?array  $vhost       = null
     ): array {
+        $validFromIso = isset($certInfo['valid_from'])
+            ? gmdate('Y-m-d\TH:i:s\Z', (int) $certInfo['valid_from'])
+            : null;
+        $validToIso = $expiry !== null ? gmdate('Y-m-d\TH:i:s\Z', $expiry) : null;
+
         return [
-            'domain'        => $domain,
-            'source'        => $source,
-            'status'        => $status,
-            'expiry'        => $expiry !== null ? gmdate('Y-m-d', $expiry) . ' UTC' : 'N/A',
-            'days_left'     => $daysLeft,
-            'needs_renewal' => $renewal,
-            'cert_dir'      => $certDir,
-            'sans'          => $sans,
-            'wildcard'      => $wildcard,
-            'installed_on'  => $installedOn,
+            'domain'               => $domain,
+            'source'               => $source,
+            'status'               => $status,
+            'expiry'               => $expiry !== null ? gmdate('Y-m-d', $expiry) . ' UTC' : 'N/A',
+            'days_left'            => $daysLeft,
+            'needs_renewal'        => $renewal,
+            'cert_dir'             => $certDir,
+            'sans'                 => $sans,
+            'wildcard'             => $wildcard,
+            'installed_on'         => $installedOn,
+            'issuer'               => $certInfo['issuer']               ?? null,
+            'subject'              => $certInfo['subject']              ?? null,
+            'serial'               => $certInfo['serial']               ?? null,
+            'signature_algorithm'  => $certInfo['signature_algorithm']  ?? null,
+            'key_algorithm'        => $certInfo['key_algorithm']        ?? null,
+            'key_size'             => $certInfo['key_size']             ?? null,
+            'fingerprint_sha256'   => $certInfo['fingerprint_sha256']   ?? null,
+            'valid_from'           => $validFromIso,
+            'valid_to'             => $validToIso,
+            'vhost'                => $vhost,
         ];
     }
 

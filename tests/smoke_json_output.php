@@ -359,6 +359,75 @@ check(
     'panel needs to distinguish a no-op re-run from a fresh complete'
 );
 
+// --- 13. ListCommand buildRow surfaces rich X.509 metadata so the panel
+// can verify SSL is installed AND configured correctly on the running
+// webserver. The fields below are populated from openssl_x509_parse +
+// openssl_pkey_get_details — without them the operator only sees the
+// domain, expiry date, and webserver install status.
+$listSrc = file_get_contents(__DIR__ . '/../src/Commands/ListCommand.php');
+$expectedKeys = [
+    'issuer',
+    'subject',
+    'serial',
+    'signature_algorithm',
+    'key_algorithm',
+    'key_size',
+    'fingerprint_sha256',
+    'valid_from',
+    'valid_to',
+    "'vhost'",
+];
+foreach ($expectedKeys as $key) {
+    check(
+        "ListCommand::buildRow surfaces `{$key}` for the panel",
+        str_contains($listSrc, $key),
+        "buildRow must include `{$key}` in its return array; the panel reads it from ubxcert list --json"
+    );
+}
+
+// --- 14. ListCommand::readCertInfo uses the PHP openssl extension to
+// extract issuer/subject/serial/key-info — i.e. no shell-out, no
+// dependency on the `openssl` binary being on PATH.
+check(
+    'ListCommand::readCertInfo parses issuer + subject via openssl_x509_parse',
+    str_contains($listSrc, "openssl_x509_parse(\$cert)")
+        && str_contains($listSrc, '$info[\'issuer\']')
+        && str_contains($listSrc, '$info[\'subject\']'),
+    'readCertInfo must read issuer/subject from openssl_x509_parse output'
+);
+check(
+    'ListCommand::readCertInfo extracts key algorithm + size via openssl_pkey_get_details',
+    str_contains($listSrc, 'openssl_pkey_get_public($cert)')
+        && str_contains($listSrc, 'openssl_pkey_get_details'),
+    'key_algorithm + key_size require openssl_pkey_get_details; openssl_x509_parse alone is not enough'
+);
+check(
+    'ListCommand::readCertInfo computes SHA-256 fingerprint from PEM body',
+    str_contains($listSrc, "hash('sha256', \$der)")
+        || str_contains($listSrc, 'hash(\'sha256\', $der)'),
+    'fingerprint_sha256 must be the SHA-256 hash of the DER-encoded cert, formatted colon-separated'
+);
+
+// --- 15. VhostScanner extends parseNginx to extract the SSL wiring the
+// operator cares about: ssl_protocols, http2_enabled, hsts_header,
+// wellknown_handler. Without these the sync response can only say
+// "cert is installed on openresty" but not "openresty is listening on
+// 443 with HTTP/2 + HSTS + lua-resty-acme fallback".
+$vhostSrc = file_get_contents(__DIR__ . '/../src/Util/VhostScanner.php');
+$vhostExpected = ['ssl_protocols', 'http2_enabled', 'hsts_header', 'wellknown_handler'];
+foreach ($vhostExpected as $key) {
+    check(
+        "VhostScanner::parseNginx populates `{$key}` on each entry",
+        str_contains($vhostSrc, "'{$key}'"),
+        "parseNginx must set `{$key}` on every entry; downstream parsers consume it"
+    );
+}
+check(
+    'VhostScanner::domainSslWebserverDetails is a public method returning an array',
+    preg_match('/public static function domainSslWebserverDetails\s*\([^)]+\)\s*:\s*\?array/', $vhostSrc) === 1,
+    'ListCommand::discoverAll calls VhostScanner::domainSslWebserverDetails($domain) to pull vhost inspection into each row'
+);
+
 if ($failures) {
     echo "\nFAILED: " . count($failures) . " check(s)\n";
     exit(1);
