@@ -720,11 +720,22 @@ class RequestCommand extends BaseCommand
         $complete = new CompleteCommand();
         $completeArgs = ['--domain', $baseDomain, '--challenge', 'http', '--wait-http', (string) $waitHttp];
         if ($staging)  { $completeArgs[] = '--staging'; }
-        if ($jsonMode) { $completeArgs[] = '--json'; }
         if ($verbose)  { $completeArgs[] = '--verbose'; }
+        // NOTE: never pass --json to the inner command. In auto-chain mode
+        // this command emits a single envelope at the end of runAutoChain;
+        // a second JSON document from the sub-command would corrupt the
+        // panel's `json.load` of the captured stdout. The sub-command's
+        // stdout is captured below so operators still see it in the
+        // envelope's `chainResult[*].output` field.
 
+        $buffered = '';
+        ob_start();
         $code = $complete->run($completeArgs);
+        $buffered = (string) ob_get_clean();
         $chainResult['complete'] = ['exit' => $code, 'wait_http' => $waitHttp];
+        if ($jsonMode && $buffered !== '') {
+            $chainResult['complete']['output'] = trim($buffered);
+        }
 
         if ($code !== 0) {
             $chainResult['install'] = ['skipped' => true, 'reason' => 'complete-failed'];
@@ -783,10 +794,15 @@ class RequestCommand extends BaseCommand
 
         $installer    = new InstallWebserverCommand();
         $installArgs  = ['--domain', $baseDomain, '--webserver', $ws];
-        if ($jsonMode) { $installArgs[] = '--json'; }
         if ($verbose)  { $installArgs[] = '--verbose'; }
+        // Same rationale as the CompleteCommand call above: keep the auto-
+        // chain's stdout as a single JSON document; capture sub-command
+        // output into the envelope so the operator can still inspect it.
 
+        $buffered = '';
+        ob_start();
         $code = $installer->run($installArgs);
+        $buffered = (string) ob_get_clean();
         $chainResult['install'] = [
             'exit'         => $code,
             'webserver'    => $ws,
@@ -798,7 +814,9 @@ class RequestCommand extends BaseCommand
                 ]
                 : null,
         ];
-
+        if ($jsonMode && $buffered !== '') {
+            $chainResult['install']['output'] = trim($buffered);
+        }
         if ($code !== 0) {
             if (!$jsonMode) {
                 $this->warn("Cert issued. Install failed (exit {$code}). Re-run manually once the vhost config is in place:");

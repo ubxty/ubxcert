@@ -287,6 +287,59 @@ check(
     'JSON output still references $challenge'
 );
 
+// --- 10. BaseCommand silences PHP diagnostics in --json mode. Without
+// this guard, a stray warning (e.g. "Undefined variable $challenge" on
+// line 265 of CompleteCommand, or a PHP 8.4 deprecation notice) prints
+// to stdout and lands before the JSON document. The panel's `json.load`
+// then fails on the leading warning line. The fix is centralized in
+// BaseCommand::parseCommonArgs so every command that accepts --json is
+// protected in one place.
+$baseSrc = file_get_contents(__DIR__ . '/../src/Commands/BaseCommand.php');
+check(
+    'BaseCommand defines silencePhpDiagnosticsForJson()',
+    str_contains($baseSrc, 'function silencePhpDiagnosticsForJson('),
+    'helper missing — JSON mode can leak warnings to stdout'
+);
+check(
+    'parseCommonArgs invokes silencePhpDiagnosticsForJson when --json is seen',
+    (bool) preg_match(
+        "/if \(\\\$arg === '--json'\) \\{\\s*\\\$this->jsonMode = true;\\s*\\\$this->silencePhpDiagnosticsForJson\\(\\);/m",
+        $baseSrc
+    ),
+    'parseCommonArgs does not gate the silence call on --json'
+);
+
+// --- 11. runAutoChain must not pass --json to inner sub-commands. The
+// auto-chain is run when --json is on the outer request, and a second
+// JSON document from the inner complete/install call would land on the
+// same stdout stream and corrupt the panel's `json.load`. Sub-commands
+// are now captured into the envelope's chainResult[*].output field
+// via ob_start/ob_get_clean instead.
+$reqSrc = file_get_contents(__DIR__ . '/../src/Commands/RequestCommand.php');
+$autoChainRegion = substr($reqSrc, (int) strpos($reqSrc, 'function runAutoChain'));
+check(
+    'runAutoChain does not pass --json to inner CompleteCommand',
+    !str_contains($autoChainRegion, '$completeArgs[] = \'--json\''),
+    'inner --json would produce a second JSON document on stdout'
+);
+check(
+    'runAutoChain does not pass --json to inner InstallWebserverCommand',
+    !str_contains($autoChainRegion, '$installArgs[] = \'--json\''),
+    'inner --json would produce a second JSON document on stdout'
+);
+check(
+    'runAutoChain captures inner sub-command stdout via ob_start',
+    str_contains($autoChainRegion, 'ob_start()')
+        && str_contains($autoChainRegion, 'ob_get_clean()'),
+    'sub-command stdout must be buffered so it does not pollute the auto-chain JSON envelope'
+);
+check(
+    'runAutoChain exposes inner output via chainResult[*].output',
+    str_contains($autoChainRegion, "\$chainResult['complete']['output']")
+        && str_contains($autoChainRegion, "\$chainResult['install']['output']"),
+    'operator should still see inner command output in the envelope'
+);
+
 if ($failures) {
     echo "\nFAILED: " . count($failures) . " check(s)\n";
     exit(1);

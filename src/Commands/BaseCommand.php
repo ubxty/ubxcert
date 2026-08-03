@@ -42,6 +42,24 @@ abstract class BaseCommand
     /** @param string[] $args argv after the command name */
     abstract public function run(array $args): int;
 
+    /**
+     * In --json mode the consumer (panel) does a strict `json.load` of our
+     * stdout, so any stray PHP notice / warning / deprecation that lands on
+     * stdout before the JSON document poisons the parse. Concrete failure
+     * we've seen: a by-ref foreach loop in a sub-command emitting
+     * "PHP Warning:  Undefined variable $challenge" on line 265 of
+     * CompleteCommand, which the panel's `json.load` then read as line 2 of
+     * the JSON stream and rejected with `JSONDecodeError`.
+     *
+     * Errors (E_ERROR) are intentionally left on so a genuine crash still
+     * surfaces through the exit code path.
+     */
+    protected function silencePhpDiagnosticsForJson(): void
+    {
+        error_reporting(E_ERROR);
+        @ini_set('display_errors', '0');
+    }
+
     // -------------------------------------------------------------------------
     // Logging
     // -------------------------------------------------------------------------
@@ -171,6 +189,7 @@ abstract class BaseCommand
         foreach ($args as $i => $arg) {
             if ($arg === '--json') {
                 $this->jsonMode = true;
+                $this->silencePhpDiagnosticsForJson();
                 unset($args[$i]);
             } elseif ($arg === '--staging') {
                 $this->staging = true;
