@@ -340,6 +340,25 @@ check(
     'operator should still see inner command output in the envelope'
 );
 
+// --- 12. CompleteCommand short-circuits when the order is already valid
+// AND a saved fullchain.pem exists. The panel shell calls `ubxcert complete`
+// even after auto-chain has finalized and downloaded the cert. Without this
+// guard, the re-run would POST to the ACME finalize endpoint again and
+// surface a "SSL generation error" to the operator. The guard returns
+// status='already-valid' in JSON mode so the panel can distinguish a true
+// re-run from a no-op.
+check(
+    'CompleteCommand has idempotency guard for already-valid orders',
+    str_contains($completeSrc, "'order_status'] ?? null) === 'valid'")
+        && str_contains($completeSrc, 'is_file($certDir . \'/fullchain.pem\')'),
+    're-running `complete` on an already-valid order would re-finalize and fail at the ACME server'
+);
+check(
+    'CompleteCommand idempotency guard returns status=already-valid in JSON',
+    str_contains($completeSrc, "'status'           => 'already-valid'"),
+    'panel needs to distinguish a no-op re-run from a fresh complete'
+);
+
 if ($failures) {
     echo "\nFAILED: " . count($failures) . " check(s)\n";
     exit(1);

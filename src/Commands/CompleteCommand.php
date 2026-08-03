@@ -76,6 +76,36 @@ class CompleteCommand extends BaseCommand
             return 1;
         }
 
+        // --- Idempotency: short-circuit when the order is already complete --
+        // The panel shell calls `ubxcert complete` even after auto-chain has
+        // already finalized and saved the cert. Without this guard, we'd
+        // re-POST to the ACME finalize endpoint and trip a "order already
+        // finalized" error, returning a non-zero exit that the panel then
+        // surfaces as "SSL generation error". Treat an already-valid order
+        // with a saved cert file as success: nothing left to do.
+        $certDir = $this->state->getCertDir($domain);
+        $hasCert = is_file($certDir . '/fullchain.pem');
+        if (($state['order_status'] ?? null) === 'valid' && $hasCert) {
+            $expiry = $this->certs->getExpiryFormatted($domain);
+            $this->out("Order already complete for {$domain}; cert present at {$certDir}/fullchain.pem.");
+            $this->out("  Expiry: {$expiry}");
+            $this->log('info', "complete short-circuited (already valid) for {$domain}");
+            if ($this->jsonMode) {
+                $this->outputJson([
+                    'domain'           => $domain,
+                    'status'           => 'already-valid',
+                    'cert_dir'         => $certDir,
+                    'letsencrypt_live' => "/etc/letsencrypt/live/{$domain}",
+                    'fullchain_pem'    => "{$certDir}/fullchain.pem",
+                    'privkey_pem'      => "{$certDir}/privkey.pem",
+                    'expiry'           => $expiry,
+                    'certificate_url'  => $state['certificate_url'] ?? null,
+                    'completed_at'     => $state['completed_at']    ?? null,
+                ]);
+            }
+            return 0;
+        }
+
         // Resolve the actual challenge type in effect (state wins, flag may override sanity)
         $stateChallenge = $state['challenge_type'] ?? 'dns';
 
