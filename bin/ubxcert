@@ -3,6 +3,16 @@
 
 declare(strict_types=1);
 
+// Send every PHP diagnostic to stderr, never stdout. Must run before the
+// autoloader is required: PHP 8.5 raises some deprecations at compile time,
+// so the first autoloaded class can emit a notice before any command has
+// had a chance to configure its own output. In --json mode stdout carries a
+// JSON document that consumers parse strictly, and a leading notice breaks
+// the parse. Callers redirect stderr to their log, so nothing is lost.
+error_reporting(E_ALL);
+ini_set('display_errors', 'stderr');
+ini_set('log_errors', '0');
+
 // Locate the autoloader — works both from source and when globally installed
 $autoloadCandidates = [
     __DIR__ . '/../vendor/autoload.php',      // dev / source run

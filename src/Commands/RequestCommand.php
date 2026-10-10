@@ -599,7 +599,8 @@ class RequestCommand extends BaseCommand
     {
         $ctx = stream_context_create(['http' => ['timeout' => 5, 'ignore_errors' => true]]);
         $body = @file_get_contents("http://{$domain}/.well-known/acme-challenge/ubxcert-precheck", false, $ctx);
-        $status = isset($http_response_header[0]) ? $http_response_header[0] : '';
+        $headers = http_get_last_response_headers();
+        $status  = $headers[0] ?? '';
         if ($body === false && $status === '') {
             return [
                 'name' => 'local_reachability',

@@ -53,6 +53,12 @@ abstract class BaseCommand
      *
      * Errors (E_ERROR) are intentionally left on so a genuine crash still
      * surfaces through the exit code path.
+     *
+     * Scope: this only suppresses diagnostics raised at *runtime*. PHP 8.5
+     * raises the $http_response_header deprecation at compile time, while
+     * the autoloader is still pulling this class tree in — long before
+     * parseCommonArgs() runs. Those cannot be caught here; bin/ubxcert sends
+     * them to stderr instead, which is what actually keeps stdout parseable.
      */
     protected function silencePhpDiagnosticsForJson(): void
     {
